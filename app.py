@@ -257,6 +257,43 @@ def ensure_state():
 
 
 # =========================
+# ✅ NEW: Weekly Plan Merge (누적 저장 + 중복 방지)
+# =========================
+def merge_weekly_plan(existing: List[Dict[str, Any]], incoming: List[Dict[str, Any]], wk: str) -> List[Dict[str, Any]]:
+    """
+    기존 주간 플랜(existing)에 새로 생성된 플랜(incoming)을 '누적'합니다.
+    - 중복 기준: (week, day, task) 동일하면 기존 것을 유지 (status/created_at 유지)
+    - task 공백은 제외
+    - day가 비어있는 건 누적에서 제외(원하면 아래 조건을 바꿀 수 있어요)
+    """
+    existing = [ensure_task_shape(t, wk) for t in (existing or []) if (t.get("task") or "").strip()]
+    incoming = [ensure_task_shape(t, wk) for t in (incoming or []) if (t.get("task") or "").strip()]
+
+    merged: List[Dict[str, Any]] = []
+    seen = set()
+
+    # 1) 기존 먼저 넣기 (기존 유지)
+    for t in existing:
+        if not (t.get("day") or ""):
+            continue
+        key = (t.get("week", wk), t.get("day", ""), (t.get("task") or "").strip().lower())
+        seen.add(key)
+        merged.append(t)
+
+    # 2) 새 플랜 추가 (중복 제외)
+    for t in incoming:
+        if not (t.get("day") or ""):
+            continue
+        key = (t.get("week", wk), t.get("day", ""), (t.get("task") or "").strip().lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(t)
+
+    return merged
+
+
+# =========================
 # Evidence Search
 # =========================
 def serper_search(query: str, api_key: str, k: int = 5) -> List[Dict[str, str]]:
@@ -568,8 +605,6 @@ def notion_create_week_page(token: str, db_id: str, title_prop: str, week_label:
     properties = {
         title_prop: {"title": [_rt(title)]}
     }
-    # 아래 2개는 DB에 동일한 속성이 없으면 에러날 수 있어서 "옵션"으로 처리하지 않고 본문(children)에만 기록
-    # 필요하면 사용자가 DB에 WeekKey/WeekLabel 속성을 만들어서 추가하도록 안내하는 방식이 안전함.
 
     payload = {
         "parent": {"database_id": db_id},
@@ -743,8 +778,10 @@ if tab == "채팅":
             st.session_state.active_plan["planA"] = (ans.get("ab_plans", {}).get("A", {}) or {}).get("steps", []) or []
             st.session_state.active_plan["planB"] = (ans.get("ab_plans", {}).get("B", {}) or {}).get("steps", []) or []
 
-            # 이번 주 생성 플랜 덮어쓰기
-            st.session_state.plan_by_week[wk] = [ensure_task_shape(t, wk) for t in ans.get("weekly_active_plan", [])]
+            # ✅✅✅ 핵심 수정: 이번 주 생성 플랜을 덮어쓰기 대신 "누적" 저장
+            existing_tasks = st.session_state.plan_by_week.get(wk, []) or []
+            new_tasks = [ensure_task_shape(t, wk) for t in ans.get("weekly_active_plan", [])]
+            st.session_state.plan_by_week[wk] = merge_weekly_plan(existing_tasks, new_tasks, wk)
 
             render_ai_answer(ans, evidence_mode)
 
@@ -1120,4 +1157,3 @@ elif tab == "주간 리포트/성장 대시보드":
     st.write("\n".join(bullets) if bullets else "이번 주 데이터가 아직 충분하지 않아요.")
 
     st.caption("팁: A/B 측정값과 주간 설문을 꾸준히 쌓으면 ‘나에게 맞는 전략’이 더 정확해져요.")
-

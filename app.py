@@ -31,6 +31,8 @@ BADGES = [
     ("plan_7_done", "최고의 실천가🔥💪", "플랜을 모두 완료했어요!"),
     ("weekly_checkin", "체크인 📈", "주간 자신감 설문을 완료했어요."),
     ("streak_3", "3일 연속 🔥", "3일 연속으로 Bloom U를 사용했어요."),
+    ("streak_7", "7일 연속 🔥🔥", "일주일 동안 Bloom U를 사용했어요."),
+    ("streak_31", "한 달 연속 성실함🔥🔥🔥", "한 달 동안 Bloom U를 사용했어요!"),
 ]
 
 ALLOWED_SOURCE_DOMAINS = [
@@ -1118,3 +1120,4 @@ elif tab == "주간 리포트/성장 대시보드":
     st.write("\n".join(bullets) if bullets else "이번 주 데이터가 아직 충분하지 않아요.")
 
     st.caption("팁: A/B 측정값과 주간 설문을 꾸준히 쌓으면 ‘나에게 맞는 전략’이 더 정확해져요.")
+

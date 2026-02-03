@@ -1,8 +1,6 @@
 import json
-import math
 import datetime as dt
-from dataclasses import dataclass
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional
 
 import pandas as pd
 import requests
@@ -11,7 +9,7 @@ from openai import OpenAI
 
 
 # =========================
-# App Identity (Req 1~3)
+# App Identity
 # =========================
 APP_NAME = "Bloom U"
 SLOGAN = '“Where You Begin to Bloom” – 20대의 모든 ‘처음’을 함께 합니다.'
@@ -30,15 +28,21 @@ BADGES = [
     ("first_chat", "첫 대화 🌱", "Bloom U와 첫 대화를 시작했어요."),
     ("first_plan", "첫 플랜 🗓️", "주간 액티브 플랜을 만들었어요."),
     ("plan_3_done", "실천가 💪", "플랜에서 3개 이상의 액션을 완료했어요."),
+    ("plan_7_done", "최고의 실천가🔥💪", "플랜을 모두 완료했어요!"),
     ("weekly_checkin", "체크인 📈", "주간 자신감 설문을 완료했어요."),
     ("streak_3", "3일 연속 🔥", "3일 연속으로 Bloom U를 사용했어요."),
 ]
 
-# Evidence mode: optional real search (Serper) + domain-whitelist
 ALLOWED_SOURCE_DOMAINS = [
     ".gov", ".edu", "who.int", "oecd.org", "nih.gov", "cdc.gov", "apa.org",
     "indeed.com", "glassdoor.com", "ncs.gov", "moel.go.kr", "korea.kr"
 ]
+
+PLAN_STATUS_OPTIONS = ["체크", "진행중", "미루기"]
+STATUS_SORT_PRIORITY = {"진행중": 0, "미루기": 1, "체크": 2}
+DAYS = ["월", "화", "수", "목", "금", "토", "일"]
+DAY_TO_IDX = {d: i for i, d in enumerate(DAYS)}
+IDX_TO_DAY = {i: d for d, i in DAY_TO_IDX.items()}
 
 
 # =========================
@@ -52,12 +56,36 @@ def week_key(d: Optional[dt.date] = None) -> str:
     y, w, _ = d.isocalendar()
     return f"{y}-W{w:02d}"
 
+def week_start_from_key(wk: str) -> dt.date:
+    # wk: "YYYY-Www"
+    try:
+        y_str, w_str = wk.split("-W")
+        y = int(y_str)
+        w = int(w_str)
+        return dt.date.fromisocalendar(y, w, 1)  # Monday
+    except Exception:
+        # fallback: current week
+        return dt.date.fromisocalendar(*today().isocalendar()[:2], 1)
+
+def week_of_month(d: dt.date) -> int:
+    # "월의 N주"를 Monday-start 주차로 계산
+    first = d.replace(day=1)
+    first_monday = first - dt.timedelta(days=first.weekday())
+    this_monday = d - dt.timedelta(days=d.weekday())
+    return (this_monday - first_monday).days // 7 + 1
+
+def week_label_yy_mm_ww_from_week_start(week_start: dt.date) -> str:
+    # week_start를 기준으로 "YY년 MM월 WW주"
+    yy = week_start.year % 100
+    mm = week_start.month
+    ww = week_of_month(week_start)
+    return f"{yy:02d}년 {mm:02d}월 {ww:02d}주"
+
 def is_allowed_url(url: str) -> bool:
     u = (url or "").lower()
     return u.startswith("http") and any(dom in u for dom in ALLOWED_SOURCE_DOMAINS)
 
 def detect_high_risk(text: str) -> bool:
-    # Heuristic; production would use better classifier.
     k = [
         "자해", "죽고", "극단", "우울", "공황", "자살", "리스트컷",
         "진단", "치료", "처방", "약", "병원",
@@ -67,35 +95,65 @@ def detect_high_risk(text: str) -> bool:
     t = (text or "").lower()
     return any(x in t for x in k)
 
-def ensure_state():
-    if "settings" not in st.session_state:
-        st.session_state.settings = {
-            "tone": TONE_OPTIONS[0],
-            "level": LEVEL_OPTIONS[0],
-            "domain": DOMAIN_OPTIONS[0],
-            "evidence_mode": True,
-            "anonymous_mode": True,
-            "nickname": "익명",
-        }
-    if "messages" not in st.session_state:
-        st.session_state.messages = []  # list of {"role": "user"/"assistant", "content": "..."}
-    if "active_plan" not in st.session_state:
-        st.session_state.active_plan = {
-            "week": week_key(),
-            "tasks": [],  # [{"task": str, "day": str, "done": bool}]
-            "planA": [],
-            "planB": [],
-        }
-    if "ab_metrics" not in st.session_state:
-        # per week: {"A": {"anxiety": int, "execution": int, "outcome": str, "notes": str}, "B": ...}
-        st.session_state.ab_metrics = {}
-    if "survey" not in st.session_state:
-        # per week: {"confidence": int, "anxiety": int, "energy": int, "notes": str}
-        st.session_state.survey = {}
-    if "badges_unlocked" not in st.session_state:
-        st.session_state.badges_unlocked = set()
-    if "usage" not in st.session_state:
-        st.session_state.usage = {"last_active": None, "streak": 0}
+def normalize_day_label(day: str) -> str:
+    d = (day or "").strip()
+    return d if d in DAYS else ""
+
+def task_uid(task: str, day: str, wk: str) -> str:
+    # 안정적인 키: task 텍스트 기반 hash + day + wk
+    h = abs(hash((task or "").strip())) % 1_000_000
+    return f"{wk}_{day}_{h}"
+
+def ensure_task_shape(t: Dict[str, Any], wk: str) -> Dict[str, Any]:
+    # 과거 호환: done -> status, week 누락시 wk로 채우기
+    out = {
+        "week": t.get("week") or wk,
+        "day": normalize_day_label(t.get("day") or ""),
+        "task": (t.get("task") or "").strip(),
+        "status": (t.get("status") or "").strip(),
+        "created_at": t.get("created_at") or dt.datetime.now().isoformat(),
+    }
+    if not out["status"]:
+        # 과거 done 기반
+        if "done" in t:
+            out["status"] = "체크" if bool(t.get("done")) else "진행중"
+        else:
+            out["status"] = "진행중"
+    if out["status"] not in PLAN_STATUS_OPTIONS:
+        out["status"] = "진행중"
+    return out
+
+def move_task_to_next_slot(t: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    '미루기' 선택 시:
+    - day가 월~토: 다음 요일로 이동 (week 유지)
+    - day가 일: 다음 주 월로 이동 (week +1)
+    - day가 비어있으면: 이번 주 '월'로 배치 (week 유지)
+    """
+    wk = t.get("week") or week_key()
+    day = normalize_day_label(t.get("day") or "")
+    if not day:
+        t["day"] = "월"
+        t["week"] = wk
+        return t
+
+    if day != "일":
+        t["day"] = IDX_TO_DAY[DAY_TO_IDX[day] + 1]
+        t["week"] = wk
+        return t
+
+    # Sunday -> next week Monday
+    start = week_start_from_key(wk)
+    next_start = start + dt.timedelta(days=7)
+    t["week"] = week_key(next_start)
+    t["day"] = "월"
+    return t
+
+def sort_tasks_for_day(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return sorted(
+        items,
+        key=lambda x: (STATUS_SORT_PRIORITY.get(x.get("status"), 9), (x.get("created_at") or ""))
+    )
 
 def update_streak_and_badges():
     last = st.session_state.usage.get("last_active")
@@ -120,10 +178,15 @@ def unlock_badges():
     if any(m["role"] == "user" for m in st.session_state.messages):
         st.session_state.badges_unlocked.add("first_chat")
 
-    if st.session_state.active_plan.get("tasks"):
+    # 전체 주차 중 1개라도 task 있으면 first_plan
+    any_tasks = any((st.session_state.plan_by_week.get(wk) or []) for wk in st.session_state.plan_by_week.keys())
+    if any_tasks:
         st.session_state.badges_unlocked.add("first_plan")
 
-    done = sum(1 for t in st.session_state.active_plan.get("tasks", []) if t.get("done"))
+    # 현재 선택 주차 기준(활성 플랜 주차) "체크" 3개 이상
+    wk = st.session_state.active_plan.get("week", week_key())
+    tasks = st.session_state.plan_by_week.get(wk, []) or []
+    done = sum(1 for t in tasks if t.get("status") == "체크")
     if done >= 3:
         st.session_state.badges_unlocked.add("plan_3_done")
 
@@ -131,13 +194,41 @@ def unlock_badges():
         st.session_state.badges_unlocked.add("weekly_checkin")
 
 
+def ensure_state():
+    if "settings" not in st.session_state:
+        st.session_state.settings = {
+            "tone": TONE_OPTIONS[0],
+            "level": LEVEL_OPTIONS[0],
+            "domain": DOMAIN_OPTIONS[0],
+            "evidence_mode": True,
+            "anonymous_mode": True,
+            "nickname": "익명",
+        }
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+    if "plan_by_week" not in st.session_state:
+        # { "YYYY-Www": [ {week,day,task,status,created_at}, ... ] }
+        st.session_state.plan_by_week = {}
+    if "active_plan" not in st.session_state:
+        st.session_state.active_plan = {
+            "week": week_key(),
+            "planA": [],
+            "planB": [],
+        }
+    if "ab_metrics" not in st.session_state:
+        st.session_state.ab_metrics = {}
+    if "survey" not in st.session_state:
+        st.session_state.survey = {}
+    if "badges_unlocked" not in st.session_state:
+        st.session_state.badges_unlocked = set()
+    if "usage" not in st.session_state:
+        st.session_state.usage = {"last_active": None, "streak": 0}
+
+
 # =========================
-# Evidence Search (Req 10)
+# Evidence Search
 # =========================
 def serper_search(query: str, api_key: str, k: int = 5) -> List[Dict[str, str]]:
-    """
-    Uses Serper (Google Search API). Optional. If not set, fall back to curated sources.
-    """
     url = "https://google.serper.dev/search"
     headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
     payload = {"q": query, "num": k}
@@ -153,10 +244,6 @@ def serper_search(query: str, api_key: str, k: int = 5) -> List[Dict[str, str]]:
     return out
 
 def curated_sources(domain: str) -> List[Dict[str, str]]:
-    """
-    No-key fallback: suggests reliable institutions per domain (not query-specific).
-    This keeps deployment stable.
-    """
     if domain == "진로":
         return [
             {"title": "고용노동부(MOEL) - 청년/취업 지원", "url": "https://www.moel.go.kr/"},
@@ -195,7 +282,7 @@ def curated_sources(domain: str) -> List[Dict[str, str]]:
 
 
 # =========================
-# Prompting & Response Parsing (Req 11~13)
+# Prompting & Parsing
 # =========================
 def build_system_prompt(settings: Dict[str, Any]) -> str:
     nickname = settings["nickname"]
@@ -242,7 +329,7 @@ JSON 스키마:
     "A": {{"title":"...", "steps":["..."], "metrics":["불안도0~10","실천도%","결과물/성과"]}},
     "B": {{"title":"...", "steps":["..."], "metrics":["불안도0~10","실천도%","결과물/성과"]}}
   }},
-  "weekly_active_plan": [{{"day":"월|화|수|목|금|토|일|", "task":"...", "done": false}}],
+  "weekly_active_plan": [{{"day":"월|화|수|목|금|토|일|", "task":"...", "status":"체크|진행중|미루기"}}],
   "risk_warning": {{
      "is_high_risk": true/false,
      "message": "경고/권고",
@@ -253,7 +340,6 @@ JSON 스키마:
 
 def call_openai_json(api_key: str, sys_prompt: str, user_prompt: str, chat: List[Dict[str, str]]) -> Dict[str, Any]:
     client = OpenAI(api_key=api_key)
-    # Keep context short-ish to reduce cost/format failures
     context = chat[-12:] if len(chat) > 12 else chat
 
     inp = [{"role": "system", "content": sys_prompt}]
@@ -261,50 +347,36 @@ def call_openai_json(api_key: str, sys_prompt: str, user_prompt: str, chat: List
         inp.append({"role": m["role"], "content": m["content"]})
     inp.append({"role": "user", "content": user_prompt})
 
-    resp = client.responses.create(
-        model=MODEL,
-        input=inp,
-        # hint: let model focus on JSON
-    )
-    txt = resp.output_text.strip()
+    resp = client.responses.create(model=MODEL, input=inp)
+    txt = (resp.output_text or "").strip()
 
-    # Some models may wrap JSON in code fences; strip them
     if txt.startswith("```"):
         txt = txt.strip("`")
-        # attempt to extract json block
         start = txt.find("{")
         end = txt.rfind("}")
-        txt = txt[start:end+1] if start != -1 and end != -1 else txt
+        txt = txt[start:end + 1] if start != -1 and end != -1 else txt
 
     return json.loads(txt)
 
-def normalize_and_validate(ai: Dict[str, Any], sources_pool: List[Dict[str, str]]) -> Dict[str, Any]:
-    """
-    Ensure:
-    - facts.sources are subset of sources_pool (for evidence mode)
-    - URLs are whitelisted
-    - required keys exist
-    """
+def normalize_and_validate(ai: Dict[str, Any], sources_pool: List[Dict[str, str]], wk: str) -> Dict[str, Any]:
     out = {
         "empathy_summary": ai.get("empathy_summary", ""),
         "facts": [],
         "strategies": ai.get("strategies", []),
         "uncertainty_tag": ai.get("uncertainty_tag", "추정(개인화 필요)"),
         "ab_plans": ai.get("ab_plans", {
-            "A": {"title": "플랜 A", "steps": [], "metrics": ["불안도0~10","실천도%","결과물/성과"]},
-            "B": {"title": "플랜 B", "steps": [], "metrics": ["불안도0~10","실천도%","결과물/성과"]},
+            "A": {"title": "플랜 A", "steps": [], "metrics": ["불안도0~10", "실천도%", "결과물/성과"]},
+            "B": {"title": "플랜 B", "steps": [], "metrics": ["불안도0~10", "실천도%", "결과물/성과"]},
         }),
         "weekly_active_plan": ai.get("weekly_active_plan", []),
         "risk_warning": ai.get("risk_warning", {"is_high_risk": False, "message": "", "safe_actions": []}),
     }
 
-    # Build allowed set from pool
     pool_urls = {s["url"] for s in (sources_pool or []) if is_allowed_url(s.get("url", ""))}
 
     facts = ai.get("facts", []) or []
     for f in facts:
         uncertainty = f.get("uncertainty", "추정")
-        # map shorthand to full labels if needed
         if uncertainty == "확실":
             uncertainty_full = UNCERTAINTY_OPTIONS[0]
         elif uncertainty == "보통":
@@ -318,15 +390,22 @@ def normalize_and_validate(ai: Dict[str, Any], sources_pool: List[Dict[str, str]
             title = s.get("title", url)
             if is_allowed_url(url) and (not pool_urls or url in pool_urls):
                 srcs.append({"title": title, "url": url})
+
         out["facts"].append({"text": f.get("text", ""), "uncertainty": uncertainty_full, "sources": srcs})
 
-    # Weekly plan normalization
+    # weekly plan normalize
     plan = []
-    for item in out["weekly_active_plan"][:12]:
+    for item in (out.get("weekly_active_plan") or [])[:24]:
+        day = normalize_day_label(item.get("day") or "")
+        status = (item.get("status") or "진행중").strip()
+        if status not in PLAN_STATUS_OPTIONS:
+            status = "진행중"
         plan.append({
-            "day": (item.get("day") or "").strip(),
+            "week": wk,
+            "day": day,
             "task": (item.get("task") or "").strip(),
-            "done": bool(item.get("done", False)),
+            "status": status,
+            "created_at": dt.datetime.now().isoformat(),
         })
     out["weekly_active_plan"] = [p for p in plan if p["task"]]
     return out
@@ -335,6 +414,15 @@ def normalize_and_validate(ai: Dict[str, Any], sources_pool: List[Dict[str, str]
 # =========================
 # Rendering helpers
 # =========================
+def risk_safety_banner_if_needed(user_text: str):
+    if detect_high_risk(user_text):
+        st.warning(
+            "⚠️ 이 대화는 법/의료/정신건강/재정 등 고위험 주제를 포함할 수 있어요.\n"
+            "가능하면 전문가(상담센터/의료진/법률/금융 전문가)와 함께 확인해 주세요.\n\n"
+            "만약 지금 매우 위험하거나 자해 충동이 있다면, 즉시 주변 도움을 요청하세요.\n"
+            "- (한국) 자살예방 상담전화 1393\n- 정신건강위기 상담 1577-0199\n- 긴급상황 112/119"
+        )
+
 def render_ai_answer(ans: Dict[str, Any], evidence_mode: bool):
     st.markdown("### 1) 공감 & 상황 요약")
     st.write(ans.get("empathy_summary", ""))
@@ -376,34 +464,6 @@ def render_ai_answer(ans: Dict[str, Any], evidence_mode: bool):
             st.write(f"- {step}")
         st.caption("측정 지표: " + ", ".join(b.get("metrics") or []))
 
-    st.markdown("### 6) 이번 주 액티브 플랜(체크리스트)")
-    plan = ans.get("weekly_active_plan", [])
-    if not plan:
-        st.caption("아직 자동 플랜을 만들기 어려웠어요. 목표/기한/제약을 조금 더 알려주면 좋아요.")
-    else:
-        for p in plan:
-            st.write(f"- {p['day']} {p['task']}")
-
-    rw = ans.get("risk_warning", {}) or {}
-    if rw.get("is_high_risk"):
-        st.markdown("### 7) 리스크 경고")
-        st.warning(rw.get("message", "고위험 주제일 수 있어요. 전문가 상담을 권장합니다."))
-        safe = rw.get("safe_actions", []) or []
-        if safe:
-            st.write("대체 안전 행동:")
-            for x in safe[:6]:
-                st.write(f"- {x}")
-
-def risk_safety_banner_if_needed(user_text: str):
-    # If user text suggests high risk, show safety note regardless of model output.
-    if detect_high_risk(user_text):
-        st.warning(
-            "⚠️ 이 대화는 법/의료/정신건강/재정 등 고위험 주제를 포함할 수 있어요.\n"
-            "가능하면 전문가(상담센터/의료진/법률/금융 전문가)와 함께 확인해 주세요.\n\n"
-            "만약 지금 매우 위험하거나 자해 충동이 있다면, 즉시 주변 도움을 요청하세요.\n"
-            "- (한국) 자살예방 상담전화 1393\n- 정신건강위기 상담 1577-0199\n- 긴급상황 112/119"
-        )
-
 
 # =========================
 # App UI
@@ -411,7 +471,7 @@ def risk_safety_banner_if_needed(user_text: str):
 st.set_page_config(page_title=f"{APP_NAME} - 상담/코칭 AI", page_icon="🌸", layout="wide")
 ensure_state()
 
-# Sidebar (Req 4~5 + API key input)
+# Sidebar
 st.sidebar.title(f"🌸 {APP_NAME}")
 st.sidebar.caption(SLOGAN)
 st.sidebar.caption(ONE_LINER)
@@ -439,12 +499,11 @@ st.session_state.settings.update({
     "nickname": nickname,
 })
 
-tab = st.sidebar.radio("탭", ["채팅", "액티브 플랜", "A/B 측정", "뱃지", "주간 설문", "주간 리포트/대시보드"], index=0)
+tab = st.sidebar.radio("탭", ["채팅", "주간 액티브 플랜", "전략A/B 측정", "뱃지", "주간 자가설문", "주간 리포트/성장 대시보드"], index=0)
 
 st.sidebar.divider()
 st.sidebar.caption(f"타겟 사용자: {TARGET}")
 st.sidebar.caption("팁: ‘목표/기한/제약/현재 상태’를 구체적으로 적을수록 플랜이 좋아져요.")
-
 
 # Header
 st.title(f"🌸 {APP_NAME}")
@@ -453,7 +512,7 @@ st.caption(ONE_LINER)
 
 
 # =========================
-# Tab: Chat (Req 6, 10~13)
+# Tab: Chat
 # =========================
 if tab == "채팅":
     st.subheader("💬 상담/코칭 챗")
@@ -489,14 +548,12 @@ if tab == "채팅":
             else:
                 sources_pool = curated_sources(domain)
 
-        # Build user prompt with SOURCES
         sources_block = ""
         if evidence_mode and sources_pool:
             sources_block = "SOURCES(공식/기관 링크):\n" + "\n".join(
                 [f"- {s['title']} | {s['url']}" for s in sources_pool[:5]]
             )
 
-        # Add personalization context: last survey + AB metrics
         wk = week_key()
         survey = st.session_state.survey.get(wk)
         metrics = st.session_state.ab_metrics.get(wk)
@@ -519,28 +576,27 @@ if tab == "채팅":
             + ("\n".join(personal_context) + "\n\n" if personal_context else "")
             + f"사용자 메시지:\n{user}"
         )
-
         sys_prompt = build_system_prompt(st.session_state.settings)
 
         with st.chat_message("assistant"):
-            placeholder = st.empty()
             try:
-                with st.spinner("Bloom U가 같이 정리하고 있어요…"):
+                with st.spinner("Bloom U가 대화를 준비중이에요"):
                     ai_json = call_openai_json(api_key, sys_prompt, user_prompt, st.session_state.messages)
-                    ans = normalize_and_validate(ai_json, sources_pool)
+                    ans = normalize_and_validate(ai_json, sources_pool, wk=wk)
             except Exception as e:
                 st.error(f"AI 응답 처리 실패(형식 오류/네트워크): {e}")
                 st.stop()
 
-            # Save plan to state (Req 6, 13)
+            # save plan to plan_by_week
             st.session_state.active_plan["week"] = wk
-            st.session_state.active_plan["tasks"] = ans.get("weekly_active_plan", [])
             st.session_state.active_plan["planA"] = (ans.get("ab_plans", {}).get("A", {}) or {}).get("steps", []) or []
             st.session_state.active_plan["planB"] = (ans.get("ab_plans", {}).get("B", {}) or {}).get("steps", []) or []
 
+            # merge/replace: 이번 주 생성 플랜은 "기본적으로 덮어쓰기"
+            st.session_state.plan_by_week[wk] = [ensure_task_shape(t, wk) for t in ans.get("weekly_active_plan", [])]
+
             render_ai_answer(ans, evidence_mode)
 
-            # store assistant content as readable markdown (not raw json)
             summary_md = (
                 f"**공감 & 요약**\n{ans.get('empathy_summary','')}\n\n"
                 f"**사실(정보)**\n" + "\n".join([f"- {f['text']}" for f in ans.get("facts", [])]) + "\n\n"
@@ -553,59 +609,218 @@ if tab == "채팅":
 
 
 # =========================
-# Tab: Active Plan (Req 6)
+# Tab: Active Plan (Calendar + Filters + Auto-reschedule)
 # =========================
 elif tab == "액티브 플랜":
-    st.subheader("🗓️ 주간 액티브 플랜")
-    wk = st.session_state.active_plan.get("week", week_key())
-    st.write(f"주차: **{wk}**")
+    st.subheader("🗓️ 주간 액티브 플랜 (달력)")
 
-    tasks = st.session_state.active_plan.get("tasks", [])
-    if not tasks:
-        st.info("아직 플랜이 없어요. ‘채팅’에서 코칭을 받은 뒤 자동 생성돼요.")
-    else:
-        st.markdown("### 체크리스트")
-        for i, t in enumerate(tasks):
-            cols = st.columns([0.15, 0.85])
-            with cols[0]:
-                t["done"] = st.checkbox("완료", value=bool(t.get("done")), key=f"task_{wk}_{i}")
-            with cols[1]:
-                day = (t.get("day") or "").strip()
-                label = f"{day+' ' if day else ''}{t.get('task','')}"
-                st.write(label)
+    # week selector: 현재 플랜 주차 + 존재하는 주차들
+    all_weeks = sorted(set([week_key()] + list(st.session_state.plan_by_week.keys())))
+    current_wk = st.session_state.active_plan.get("week", week_key())
+    if current_wk not in all_weeks:
+        all_weeks.append(current_wk)
+        all_weeks = sorted(all_weeks)
 
-        st.session_state.active_plan["tasks"] = tasks
-        unlock_badges()
+    chosen_wk = st.selectbox(
+        "주차 선택",
+        all_weeks,
+        index=all_weeks.index(current_wk) if current_wk in all_weeks else 0
+    )
+    st.session_state.active_plan["week"] = chosen_wk
 
-        st.divider()
-        st.markdown("### 플랜 A / B(코칭에서 생성됨)")
-        c1, c2 = st.columns(2)
-        with c1:
-            st.write("**플랜 A**")
-            for x in st.session_state.active_plan.get("planA", [])[:10]:
-                st.write(f"- {x}")
-        with c2:
-            st.write("**플랜 B**")
-            for x in st.session_state.active_plan.get("planB", [])[:10]:
-                st.write(f"- {x}")
+    week_start = week_start_from_key(chosen_wk)
+    label = week_label_yy_mm_ww_from_week_start(week_start)
+    st.write(f"주차: **{label}**  (키: {chosen_wk})")
+
+    # Filters
+    st.markdown("### 보기 옵션")
+    c1, c2, c3 = st.columns([0.38, 0.32, 0.30])
+    with c1:
+        status_filter = st.multiselect(
+            "상태 필터",
+            PLAN_STATUS_OPTIONS,
+            default=PLAN_STATUS_OPTIONS,
+            help="예: ‘체크’만 모아보기"
+        )
+    with c2:
+        show_only_today = st.toggle("오늘 요일만 보기", value=False)
+    with c3:
+        show_sort = st.toggle("상태별 자동 정렬(진행중→미루기→체크)", value=True)
+
+    st.divider()
+
+    tasks = st.session_state.plan_by_week.get(chosen_wk, []) or []
+    tasks = [ensure_task_shape(t, chosen_wk) for t in tasks if (t.get("task") or "").strip()]
+    st.session_state.plan_by_week[chosen_wk] = tasks
+
+    # Calendar header with actual dates
+    st.markdown("### 달력 보기 (요일별)")
+    st.caption("체크박스 = ‘체크’ 토글 / 상태 선택 = 체크·진행중·미루기 / ‘미루기’ 선택 시 자동으로 다음 요일(또는 다음 주)로 이동")
+
+    cols = st.columns(7)
+    today_idx = today().weekday()  # Mon=0..Sun=6
+
+    # Helper to get items for a day, with filters and sorting
+    def get_day_items(day_label: str) -> List[Dict[str, Any]]:
+        items = [t for t in st.session_state.plan_by_week.get(chosen_wk, []) if t.get("day") == day_label]
+        items = [t for t in items if t.get("status") in status_filter]
+        if show_sort:
+            items = sort_tasks_for_day(items)
+        return items
+
+    # If "today only" -> limit days
+    days_to_render = DAYS
+    if show_only_today:
+        days_to_render = [IDX_TO_DAY.get(today_idx, "월")]
+
+    # render full week columns always for layout stability, but hide content for non-today when toggle on
+    for i, d in enumerate(DAYS):
+        with cols[i]:
+            date_i = week_start + dt.timedelta(days=i)
+            dow_name = d
+            date_label = date_i.strftime("%m/%d")
+            is_today_col = (date_i == today())
+
+            # Title
+            if is_today_col:
+                st.markdown(f"#### {dow_name} · {date_label} ⭐")
+            else:
+                st.markdown(f"#### {dow_name} · {date_label}")
+
+            if show_only_today and d not in days_to_render:
+                st.caption(" ")
+                continue
+
+            day_items = get_day_items(d)
+            if not day_items:
+                st.caption("—")
+                continue
+
+            # render each task item
+            for j, item in enumerate(day_items):
+                uid = task_uid(item["task"], item.get("day", ""), item.get("week", chosen_wk))
+                base_key = f"cal_{uid}_{j}"
+
+                # 1) checkbox only (no label text)
+                checked_now = st.checkbox(
+                    label="",
+                    value=(item["status"] == "체크"),
+                    key=f"{base_key}_chk",
+                    help="체크(완료) 토글"
+                )
+
+                # 2) status select
+                cur_status = item["status"] if item["status"] in PLAN_STATUS_OPTIONS else "진행중"
+                selected_status = st.selectbox(
+                    "상태",
+                    PLAN_STATUS_OPTIONS,
+                    index=PLAN_STATUS_OPTIONS.index(cur_status),
+                    key=f"{base_key}_status",
+                    label_visibility="collapsed"
+                )
+
+                # Sync: checkbox wins for '체크'
+                prev_status = item["status"]
+                if checked_now:
+                    item["status"] = "체크"
+                else:
+                    # if selectbox is '체크' but checkbox false -> 내려줌
+                    if selected_status == "체크":
+                        item["status"] = "진행중"
+                    else:
+                        item["status"] = selected_status
+
+                # Auto-reschedule on '미루기' transition
+                # 조건: 이번 렌더에서 status가 '미루기'로 바뀌었고, 직전 status가 '미루기'가 아니었을 때
+                if item["status"] == "미루기" and prev_status != "미루기":
+                    # remove from current week list first
+                    cur_list = st.session_state.plan_by_week.get(chosen_wk, []) or []
+                    # find by matching (task, day, created_at) as best-effort
+                    removed = False
+                    for idx in range(len(cur_list) - 1, -1, -1):
+                        t = cur_list[idx]
+                        if t.get("task") == item.get("task") and t.get("day") == item.get("day") and t.get("created_at") == item.get("created_at"):
+                            cur_list.pop(idx)
+                            removed = True
+                            break
+                    if not removed:
+                        # fallback: pop first match by task+day
+                        for idx in range(len(cur_list) - 1, -1, -1):
+                            t = cur_list[idx]
+                            if t.get("task") == item.get("task") and t.get("day") == item.get("day"):
+                                cur_list.pop(idx)
+                                break
+                    st.session_state.plan_by_week[chosen_wk] = cur_list
+
+                    # move to next slot
+                    moved = dict(item)
+                    moved = move_task_to_next_slot(moved)
+
+                    # add to target week list
+                    target_wk = moved.get("week", chosen_wk)
+                    st.session_state.plan_by_week.setdefault(target_wk, [])
+                    st.session_state.plan_by_week[target_wk].append(moved)
+
+                    # 안내 텍스트
+                    if target_wk == chosen_wk:
+                        st.caption(f"➡️ 다음 요일로 이동됨: {moved.get('day')}")
+                    else:
+                        st.caption(f"➡️ 다음 주로 이동됨: {target_wk} ({moved.get('day')})")
+
+                    # UI 리프레시(즉시 반영)
+                    st.rerun()
+
+                # Badge + task text
+                badge = "✅" if item["status"] == "체크" else ("⏳" if item["status"] == "진행중" else "🕒")
+                st.write(f"{badge} {item['task']}")
+
+    unlock_badges()
+
+    st.divider()
+    st.markdown("### 플랜 A / B(코칭에서 생성됨)")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.write("**플랜 A**")
+        for x in st.session_state.active_plan.get("planA", [])[:10]:
+            st.write(f"- {x}")
+    with c2:
+        st.write("**플랜 B**")
+        for x in st.session_state.active_plan.get("planB", [])[:10]:
+            st.write(f"- {x}")
 
     st.divider()
     st.markdown("### 액션 직접 추가")
-    new_task = st.text_input("새 액션", placeholder="예: 25분 집중해서 과제 1페이지 쓰기")
+    colA, colB = st.columns([0.30, 0.70])
+    with colA:
+        new_day = st.selectbox("요일", [""] + DAYS, index=0)
+    with colB:
+        new_task = st.text_input("새 액션", placeholder="예: 25분 집중해서 과제 1페이지 쓰기")
+    new_status = st.selectbox("초기 상태", PLAN_STATUS_OPTIONS, index=PLAN_STATUS_OPTIONS.index("진행중"))
+
     if st.button("추가", use_container_width=True):
         if new_task.strip():
-            st.session_state.active_plan.setdefault("tasks", []).append({"day": "", "task": new_task.strip(), "done": False})
+            t = {
+                "week": chosen_wk,
+                "day": normalize_day_label(new_day),
+                "task": new_task.strip(),
+                "status": new_status,
+                "created_at": dt.datetime.now().isoformat(),
+            }
+            st.session_state.plan_by_week.setdefault(chosen_wk, [])
+            st.session_state.plan_by_week[chosen_wk].append(t)
             st.success("추가했어요!")
             unlock_badges()
+            st.rerun()
 
 
 # =========================
-# Tab: A/B Metrics (Req 13)
+# Tab: A/B Metrics
 # =========================
 elif tab == "A/B 측정":
     st.subheader("🧪 A/B 플랜 측정 (다음 코칭에 반영)")
     wk = st.session_state.active_plan.get("week", week_key())
-    st.write(f"주차: **{wk}**")
+    week_start = week_start_from_key(wk)
+    st.write(f"주차: **{week_label_yy_mm_ww_from_week_start(week_start)}**  (키: {wk})")
 
     if wk not in st.session_state.ab_metrics:
         st.session_state.ab_metrics[wk] = {
@@ -627,11 +842,11 @@ elif tab == "A/B 측정":
                 "notes": notes,
             }
 
-    st.success("저장됨! 다음에 ‘채팅’에서 답변 품질이 더 개인화돼요.")
+    st.success("저장됨! 다음에 ‘채팅’에서는 답변을 더 개인맞춤형으로 해드릴게요.")
 
 
 # =========================
-# Tab: Badges (Req 7)
+# Tab: Badges
 # =========================
 elif tab == "뱃지":
     st.subheader("🏅 뱃지 시스템")
@@ -649,12 +864,13 @@ elif tab == "뱃지":
 
 
 # =========================
-# Tab: Weekly Survey (Req 9)
+# Tab: Weekly Survey
 # =========================
 elif tab == "주간 설문":
     st.subheader("📝 주간 자가설문(자신감 지수)")
     wk = week_key()
-    st.write(f"이번 주: **{wk}**")
+    week_start = week_start_from_key(wk)
+    st.write(f"이번 주: **{week_label_yy_mm_ww_from_week_start(week_start)}**  (키: {wk})")
 
     cur = st.session_state.survey.get(wk, {"confidence": 5, "anxiety": 5, "energy": 5, "notes": ""})
 
@@ -676,26 +892,25 @@ elif tab == "주간 설문":
 
 
 # =========================
-# Tab: Weekly Report / Dashboard (Req 8)
+# Tab: Weekly Report / Dashboard
 # =========================
 elif tab == "주간 리포트/대시보드":
     st.subheader("📊 주간 레포트 & 성장 시각화 대시보드")
 
-    # Combine weeks
-    weeks = sorted(set(list(st.session_state.survey.keys()) + list(st.session_state.ab_metrics.keys())))
+    weeks = sorted(set(list(st.session_state.survey.keys()) + list(st.session_state.ab_metrics.keys()) + list(st.session_state.plan_by_week.keys())))
     if not weeks:
-        st.info("아직 데이터가 없어요. 주간 설문을 저장하거나 A/B 측정을 해보세요.")
+        st.info("아직 데이터가 없어요. 주간 설문을 저장하거나 전략 A/B 맞춤 측정을 해보세요.")
         st.stop()
 
     rows = []
     for wk in weeks:
         s = st.session_state.survey.get(wk, {})
         m = st.session_state.ab_metrics.get(wk, {})
+        tasks = st.session_state.plan_by_week.get(wk, []) or []
+
         completion = None
-        if st.session_state.active_plan.get("week") == wk:
-            tasks = st.session_state.active_plan.get("tasks", [])
-            if tasks:
-                completion = round(100 * sum(1 for t in tasks if t.get("done")) / len(tasks), 1)
+        if tasks:
+            completion = round(100 * sum(1 for t in tasks if t.get("status") == "체크") / len(tasks), 1)
 
         rows.append({
             "week": wk,
@@ -738,4 +953,3 @@ elif tab == "주간 리포트/대시보드":
     st.write("\n".join(bullets) if bullets else "이번 주 데이터가 아직 충분하지 않아요.")
 
     st.caption("팁: A/B 측정값과 주간 설문을 꾸준히 쌓으면 ‘나에게 맞는 전략’이 더 정확해져요.")
-

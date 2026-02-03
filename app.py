@@ -65,7 +65,8 @@ def week_start_from_key(wk: str) -> dt.date:
         return dt.date.fromisocalendar(y, w, 1)  # Monday
     except Exception:
         # fallback: current week
-        return dt.date.fromisocalendar(*today().isocalendar()[:2], 1)
+        y, w, _ = today().isocalendar()
+        return dt.date.fromisocalendar(y, w, 1)
 
 def week_of_month(d: dt.date) -> int:
     # "월의 N주"를 Monday-start 주차로 계산
@@ -114,7 +115,6 @@ def ensure_task_shape(t: Dict[str, Any], wk: str) -> Dict[str, Any]:
         "created_at": t.get("created_at") or dt.datetime.now().isoformat(),
     }
     if not out["status"]:
-        # 과거 done 기반
         if "done" in t:
             out["status"] = "체크" if bool(t.get("done")) else "진행중"
         else:
@@ -178,12 +178,10 @@ def unlock_badges():
     if any(m["role"] == "user" for m in st.session_state.messages):
         st.session_state.badges_unlocked.add("first_chat")
 
-    # 전체 주차 중 1개라도 task 있으면 first_plan
     any_tasks = any((st.session_state.plan_by_week.get(wk) or []) for wk in st.session_state.plan_by_week.keys())
     if any_tasks:
         st.session_state.badges_unlocked.add("first_plan")
 
-    # 현재 선택 주차 기준(활성 플랜 주차) "체크" 3개 이상
     wk = st.session_state.active_plan.get("week", week_key())
     tasks = st.session_state.plan_by_week.get(wk, []) or []
     done = sum(1 for t in tasks if t.get("status") == "체크")
@@ -192,7 +190,6 @@ def unlock_badges():
 
     if week_key() in st.session_state.survey:
         st.session_state.badges_unlocked.add("weekly_checkin")
-
 
 def ensure_state():
     if "settings" not in st.session_state:
@@ -207,7 +204,6 @@ def ensure_state():
     if "messages" not in st.session_state:
         st.session_state.messages = []
     if "plan_by_week" not in st.session_state:
-        # { "YYYY-Www": [ {week,day,task,status,created_at}, ... ] }
         st.session_state.plan_by_week = {}
     if "active_plan" not in st.session_state:
         st.session_state.active_plan = {
@@ -393,7 +389,6 @@ def normalize_and_validate(ai: Dict[str, Any], sources_pool: List[Dict[str, str]
 
         out["facts"].append({"text": f.get("text", ""), "uncertainty": uncertainty_full, "sources": srcs})
 
-    # weekly plan normalize
     plan = []
     for item in (out.get("weekly_active_plan") or [])[:24]:
         day = normalize_day_label(item.get("day") or "")
@@ -499,7 +494,19 @@ st.session_state.settings.update({
     "nickname": nickname,
 })
 
-tab = st.sidebar.radio("탭", ["채팅", "주간 액티브 플랜", "전략 A/B 측정", "뱃지", "주간 자가설문", "주간 리포트/성장 대시보드"], index=0)
+# ✅ 탭 문자열을 “radio 옵션”과 “if/elif 비교”에서 완전히 동일하게 유지
+TAB_CHAT = "채팅"
+TAB_PLAN = "주간 액티브 플랜"
+TAB_AB = "전략 A/B 측정"
+TAB_BADGE = "뱃지"
+TAB_SURVEY = "주간 자가설문"
+TAB_DASH = "주간 리포트/성장 대시보드"
+
+tab = st.sidebar.radio(
+    "탭",
+    [TAB_CHAT, TAB_PLAN, TAB_AB, TAB_BADGE, TAB_SURVEY, TAB_DASH],
+    index=0
+)
 
 st.sidebar.divider()
 st.sidebar.caption(f"타겟 사용자: {TARGET}")
@@ -514,7 +521,7 @@ st.caption(ONE_LINER)
 # =========================
 # Tab: Chat
 # =========================
-if tab == "채팅":
+if tab == TAB_CHAT:
     st.subheader("💬 상담/코칭 챗")
 
     for m in st.session_state.messages:
@@ -535,7 +542,6 @@ if tab == "채팅":
                 st.error("사이드바에 OpenAI API Key를 넣어야 해요.")
             st.stop()
 
-        # Evidence pool
         sources_pool = []
         if evidence_mode:
             serper_key = st.secrets.get("SERPER_API_KEY", "")
@@ -587,12 +593,10 @@ if tab == "채팅":
                 st.error(f"AI 응답 처리 실패(형식 오류/네트워크): {e}")
                 st.stop()
 
-            # save plan to plan_by_week
             st.session_state.active_plan["week"] = wk
             st.session_state.active_plan["planA"] = (ans.get("ab_plans", {}).get("A", {}) or {}).get("steps", []) or []
             st.session_state.active_plan["planB"] = (ans.get("ab_plans", {}).get("B", {}) or {}).get("steps", []) or []
 
-            # merge/replace: 이번 주 생성 플랜은 "기본적으로 덮어쓰기"
             st.session_state.plan_by_week[wk] = [ensure_task_shape(t, wk) for t in ans.get("weekly_active_plan", [])]
 
             render_ai_answer(ans, evidence_mode)
@@ -609,12 +613,11 @@ if tab == "채팅":
 
 
 # =========================
-# Tab: Active Plan (Calendar + Filters + Auto-reschedule)
+# Tab: Active Plan
 # =========================
-elif tab == "액티브 플랜":
+elif tab == TAB_PLAN:
     st.subheader("🗓️ 주간 액티브 플랜 (달력)")
 
-    # week selector: 현재 플랜 주차 + 존재하는 주차들
     all_weeks = sorted(set([week_key()] + list(st.session_state.plan_by_week.keys())))
     current_wk = st.session_state.active_plan.get("week", week_key())
     if current_wk not in all_weeks:
@@ -632,7 +635,6 @@ elif tab == "액티브 플랜":
     label = week_label_yy_mm_ww_from_week_start(week_start)
     st.write(f"주차: **{label}**  (키: {chosen_wk})")
 
-    # Filters
     st.markdown("### 보기 옵션")
     c1, c2, c3 = st.columns([0.38, 0.32, 0.30])
     with c1:
@@ -653,14 +655,14 @@ elif tab == "액티브 플랜":
     tasks = [ensure_task_shape(t, chosen_wk) for t in tasks if (t.get("task") or "").strip()]
     st.session_state.plan_by_week[chosen_wk] = tasks
 
-    # Calendar header with actual dates
     st.markdown("### 달력 보기 (요일별)")
     st.caption("체크박스 = ‘체크’ 토글 / 상태 선택 = 체크·진행중·미루기 / ‘미루기’ 선택 시 자동으로 다음 요일(또는 다음 주)로 이동")
 
     cols = st.columns(7)
-    today_idx = today().weekday()  # Mon=0..Sun=6
+    days_to_render = DAYS
+    if show_only_today:
+        days_to_render = [IDX_TO_DAY.get(today().weekday(), "월")]
 
-    # Helper to get items for a day, with filters and sorting
     def get_day_items(day_label: str) -> List[Dict[str, Any]]:
         items = [t for t in st.session_state.plan_by_week.get(chosen_wk, []) if t.get("day") == day_label]
         items = [t for t in items if t.get("status") in status_filter]
@@ -668,24 +670,13 @@ elif tab == "액티브 플랜":
             items = sort_tasks_for_day(items)
         return items
 
-    # If "today only" -> limit days
-    days_to_render = DAYS
-    if show_only_today:
-        days_to_render = [IDX_TO_DAY.get(today_idx, "월")]
-
-    # render full week columns always for layout stability, but hide content for non-today when toggle on
     for i, d in enumerate(DAYS):
         with cols[i]:
             date_i = week_start + dt.timedelta(days=i)
-            dow_name = d
             date_label = date_i.strftime("%m/%d")
             is_today_col = (date_i == today())
 
-            # Title
-            if is_today_col:
-                st.markdown(f"#### {dow_name} · {date_label} ⭐")
-            else:
-                st.markdown(f"#### {dow_name} · {date_label}")
+            st.markdown(f"#### {d} · {date_label}{' ⭐' if is_today_col else ''}")
 
             if show_only_today and d not in days_to_render:
                 st.caption(" ")
@@ -696,12 +687,10 @@ elif tab == "액티브 플랜":
                 st.caption("—")
                 continue
 
-            # render each task item
             for j, item in enumerate(day_items):
                 uid = task_uid(item["task"], item.get("day", ""), item.get("week", chosen_wk))
                 base_key = f"cal_{uid}_{j}"
 
-                # 1) checkbox only (no label text)
                 checked_now = st.checkbox(
                     label="",
                     value=(item["status"] == "체크"),
@@ -709,7 +698,6 @@ elif tab == "액티브 플랜":
                     help="체크(완료) 토글"
                 )
 
-                # 2) status select
                 cur_status = item["status"] if item["status"] in PLAN_STATUS_OPTIONS else "진행중"
                 selected_status = st.selectbox(
                     "상태",
@@ -719,23 +707,17 @@ elif tab == "액티브 플랜":
                     label_visibility="collapsed"
                 )
 
-                # Sync: checkbox wins for '체크'
                 prev_status = item["status"]
                 if checked_now:
                     item["status"] = "체크"
                 else:
-                    # if selectbox is '체크' but checkbox false -> 내려줌
                     if selected_status == "체크":
                         item["status"] = "진행중"
                     else:
                         item["status"] = selected_status
 
-                # Auto-reschedule on '미루기' transition
-                # 조건: 이번 렌더에서 status가 '미루기'로 바뀌었고, 직전 status가 '미루기'가 아니었을 때
                 if item["status"] == "미루기" and prev_status != "미루기":
-                    # remove from current week list first
                     cur_list = st.session_state.plan_by_week.get(chosen_wk, []) or []
-                    # find by matching (task, day, created_at) as best-effort
                     removed = False
                     for idx in range(len(cur_list) - 1, -1, -1):
                         t = cur_list[idx]
@@ -744,7 +726,6 @@ elif tab == "액티브 플랜":
                             removed = True
                             break
                     if not removed:
-                        # fallback: pop first match by task+day
                         for idx in range(len(cur_list) - 1, -1, -1):
                             t = cur_list[idx]
                             if t.get("task") == item.get("task") and t.get("day") == item.get("day"):
@@ -752,25 +733,15 @@ elif tab == "액티브 플랜":
                                 break
                     st.session_state.plan_by_week[chosen_wk] = cur_list
 
-                    # move to next slot
                     moved = dict(item)
                     moved = move_task_to_next_slot(moved)
 
-                    # add to target week list
                     target_wk = moved.get("week", chosen_wk)
                     st.session_state.plan_by_week.setdefault(target_wk, [])
                     st.session_state.plan_by_week[target_wk].append(moved)
 
-                    # 안내 텍스트
-                    if target_wk == chosen_wk:
-                        st.caption(f"➡️ 다음 요일로 이동됨: {moved.get('day')}")
-                    else:
-                        st.caption(f"➡️ 다음 주로 이동됨: {target_wk} ({moved.get('day')})")
-
-                    # UI 리프레시(즉시 반영)
                     st.rerun()
 
-                # Badge + task text
                 badge = "✅" if item["status"] == "체크" else ("⏳" if item["status"] == "진행중" else "🕒")
                 st.write(f"{badge} {item['task']}")
 
@@ -816,7 +787,7 @@ elif tab == "액티브 플랜":
 # =========================
 # Tab: A/B Metrics
 # =========================
-elif tab == "A/B 측정":
+elif tab == TAB_AB:
     st.subheader("🧪 전략A/B 플랜 측정 (다음 코칭에 반영)")
     wk = st.session_state.active_plan.get("week", week_key())
     week_start = week_start_from_key(wk)
@@ -848,7 +819,7 @@ elif tab == "A/B 측정":
 # =========================
 # Tab: Badges
 # =========================
-elif tab == "뱃지":
+elif tab == TAB_BADGE:
     st.subheader("🏅 뱃지 시스템")
     unlock_badges()
 
@@ -866,7 +837,7 @@ elif tab == "뱃지":
 # =========================
 # Tab: Weekly Survey
 # =========================
-elif tab == "주간 설문":
+elif tab == TAB_SURVEY:
     st.subheader("📝 주간 자가설문(자신감 지수)")
     wk = week_key()
     week_start = week_start_from_key(wk)
@@ -894,7 +865,7 @@ elif tab == "주간 설문":
 # =========================
 # Tab: Weekly Report / Dashboard
 # =========================
-elif tab == "주간 리포트/성장 대시보드":
+elif tab == TAB_DASH:
     st.subheader("📊 주간 레포트 & 성장 시각화 대시보드")
 
     weeks = sorted(set(list(st.session_state.survey.keys()) + list(st.session_state.ab_metrics.keys()) + list(st.session_state.plan_by_week.keys())))
@@ -954,3 +925,10 @@ elif tab == "주간 리포트/성장 대시보드":
 
     st.caption("팁: A/B 측정값과 주간 설문을 꾸준히 쌓으면 ‘나에게 맞는 전략’이 더 정확해져요.")
 
+
+# =========================
+# Safety net: unmatched tab
+# =========================
+else:
+    st.error(f"탭 분기 매칭 실패: {tab}")
+    st.caption("sidebar.radio 옵션 문자열과 if/elif 비교 문자열이 완전히 동일해야 합니다.")

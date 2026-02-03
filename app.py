@@ -265,7 +265,6 @@ def call_openai_json(api_key: str, sys_prompt: str, user_prompt: str, chat: List
         model=MODEL,
         input=inp,
         # hint: let model focus on JSON
-        temperature=0.6,
     )
     txt = resp.output_text.strip()
 
@@ -739,3 +738,4 @@ elif tab == "주간 리포트/대시보드":
     st.write("\n".join(bullets) if bullets else "이번 주 데이터가 아직 충분하지 않아요.")
 
     st.caption("팁: A/B 측정값과 주간 설문을 꾸준히 쌓으면 ‘나에게 맞는 전략’이 더 정확해져요.")
+

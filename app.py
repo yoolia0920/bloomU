@@ -44,6 +44,35 @@ DAYS = ["월", "화", "수", "목", "금", "토", "일"]
 DAY_TO_IDX = {d: i for i, d in enumerate(DAYS)}
 IDX_TO_DAY = {i: d for d, i in DAY_TO_IDX.items()}
 
+# ✅ 톤 옵션별 “말투 규칙” (프롬프트에 강제 주입)
+TONE_GUIDE = {
+    "따뜻한 친구형": [
+        "부드럽고 다정한 말투. 시작은 공감 1~2문장.",
+        "제안형 표현(‘~해볼래?’, ‘괜찮다면…’)을 사용.",
+        "단정/비난 금지. 대안은 2~3개로 간단히."
+    ],
+    "현실직언형": [
+        "간결·직설. 핵심부터 말하고 다음 행동을 명확히.",
+        "핑계는 부드럽게 끊고 ‘지금 할 것’ 1~3개 제시.",
+        "과장된 위로는 하지 말고 실행에 집중."
+    ],
+    "선배멘토형": [
+        "선배처럼 공감 + 경험/일반론 기반 조언.",
+        "장기/단기 로드맵과 우선순위를 잡아준다.",
+        "마지막에 질문 1개만 던져 선택을 돕는다."
+    ],
+    "코치·트레이너형": [
+        "목표지향, 측정 가능한 행동 중심.",
+        "시간 박스(예: 15분) + 체크리스트 + 피드백 루프 포함.",
+        "불필요한 감정 과잉 없이 ‘실행/측정’ 중심."
+    ],
+    "부모님형": [
+        "따뜻하지만 단호. 안전/건강/기본 루틴을 먼저 챙김.",
+        "수면/식사/무리 금지 같은 기본 루틴 1회 언급.",
+        "비난은 금지, 보호적 뉘앙스로 조언."
+    ],
+}
+
 
 # =========================
 # Utilities
@@ -61,7 +90,7 @@ def week_start_from_key(wk: str) -> dt.date:
         y_str, w_str = wk.split("-W")
         y = int(y_str)
         w = int(w_str)
-        return dt.date.fromisocalendar(y, w, 1)
+        return dt.date.fromisocalendar(y, w, 1)  # Monday
     except Exception:
         y, w, _ = today().isocalendar()
         return dt.date.fromisocalendar(y, w, 1)
@@ -118,6 +147,12 @@ def ensure_task_shape(t: Dict[str, Any], wk: str) -> Dict[str, Any]:
     return out
 
 def move_task_to_next_slot(t: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    '미루기' 선택 시:
+    - day가 월~토: 다음 요일로 이동 (week 유지)
+    - day가 일: 다음 주 월로 이동 (week +1)
+    - day가 비어있으면: 이번 주 '월'로 배치 (week 유지)
+    """
     wk = t.get("week") or week_key()
     day = normalize_day_label(t.get("day") or "")
     if not day:
@@ -175,6 +210,9 @@ def unlock_badges():
     if done >= 3:
         st.session_state.badges_unlocked.add("plan_3_done")
 
+    if tasks and all(t.get("status") == "체크" for t in tasks):
+        st.session_state.badges_unlocked.add("plan_7_done")
+
     if week_key() in st.session_state.survey:
         st.session_state.badges_unlocked.add("weekly_checkin")
 
@@ -193,7 +231,11 @@ def ensure_state():
     if "plan_by_week" not in st.session_state:
         st.session_state.plan_by_week = {}
     if "active_plan" not in st.session_state:
-        st.session_state.active_plan = {"week": week_key(), "planA": [], "planB": []}
+        st.session_state.active_plan = {
+            "week": week_key(),
+            "planA": [],
+            "planB": [],
+        }
     if "ab_metrics" not in st.session_state:
         st.session_state.ab_metrics = {}
     if "survey" not in st.session_state:
@@ -202,9 +244,14 @@ def ensure_state():
         st.session_state.badges_unlocked = set()
     if "usage" not in st.session_state:
         st.session_state.usage = {"last_active": None, "streak": 0}
-    # ✅ A/B 저장 알림 플래그 (이번 요청 핵심)
-    if "ab_saved_notice" not in st.session_state:
-        st.session_state.ab_saved_notice = False
+
+    # ✅ 사용자 Notion 입력 기반 저장(1번)
+    if "notion" not in st.session_state:
+        st.session_state.notion = {
+            "token": "",
+            "db_id": "",
+            "title_prop": "Name",  # 사용자 DB의 Title property 이름
+        }
 
 
 # =========================
@@ -273,6 +320,8 @@ def build_system_prompt(settings: Dict[str, Any]) -> str:
     domain = settings["domain"]
     evidence_mode = settings["evidence_mode"]
 
+    tone_rules = "\n".join([f"- {x}" for x in TONE_GUIDE.get(tone, [])])
+
     return f"""
 당신은 20대 대학생들이 맞이할 모든 첫 시작을 도울 러닝메이트 코칭 매니저입니다.
 사용자의 닉네임은 '{nickname}'이며 반드시 이 이름으로 부르세요.
@@ -282,8 +331,11 @@ def build_system_prompt(settings: Dict[str, Any]) -> str:
 - 레벨: {level}
 - 분야: {domain}
 
+[말투 규칙(반드시 준수)]
+{tone_rules}
+
 [핵심 원칙]
-- 공감(친구 같은 다정함) + 현실감각 있는 조언(인생 선배 관점)을 항상 함께 제공합니다.
+- 공감(다정함) + 현실 조언(실행 가능한 조언)을 함께 제공합니다.
 - 사실(정보)과 전략(개인화 조언)을 명확히 구분합니다.
 - 불확실성 태그를 반드시 붙입니다: {", ".join(UNCERTAINTY_OPTIONS)}
 - A/B 플랜(서로 다른 전략 2개)을 제공하고, 측정 지표를 포함합니다:
@@ -318,7 +370,7 @@ JSON 스키마:
      "safe_actions": ["...", "..."]
   }}
 }}
-"""
+""".strip()
 
 def call_openai_json(api_key: str, sys_prompt: str, user_prompt: str, chat: List[Dict[str, str]]) -> Dict[str, Any]:
     client = OpenAI(api_key=api_key)
@@ -447,6 +499,90 @@ def render_ai_answer(ans: Dict[str, Any], evidence_mode: bool):
 
 
 # =========================
+# Notion Export (✅ 1번: 사용자 Notion에 저장)
+# =========================
+def notion_ready() -> bool:
+    tok = (st.session_state.notion.get("token") or "").strip()
+    dbid = (st.session_state.notion.get("db_id") or "").strip()
+    return bool(tok) and bool(dbid)
+
+def notion_headers(token: str) -> Dict[str, str]:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Notion-Version": "2022-06-28",
+        "Content-Type": "application/json",
+    }
+
+def _rt(text: str) -> Dict[str, Any]:
+    return {"type": "text", "text": {"content": text}}
+
+def build_week_plan_blocks(week_label: str, wk: str, tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    blocks: List[Dict[str, Any]] = []
+    blocks.append({
+        "object": "block",
+        "type": "heading_2",
+        "heading_2": {"rich_text": [_rt(f"주간 액티브 플랜 · {week_label}")]}
+    })
+    blocks.append({
+        "object": "block",
+        "type": "paragraph",
+        "paragraph": {"rich_text": [_rt(f"WeekKey: {wk}")]}
+    })
+
+    tasks_norm = [ensure_task_shape(t, wk) for t in (tasks or []) if (t.get("task") or "").strip()]
+    for d in DAYS:
+        day_items = [t for t in tasks_norm if t.get("day") == d]
+        if not day_items:
+            continue
+        day_items = sort_tasks_for_day(day_items)
+
+        blocks.append({
+            "object": "block",
+            "type": "heading_3",
+            "heading_3": {"rich_text": [_rt(d)]}
+        })
+        for t in day_items:
+            status = t.get("status", "진행중")
+            icon = "✅" if status == "체크" else ("⏳" if status == "진행중" else "🕒")
+            line = f"{icon} [{status}] {t.get('task','')}"
+            blocks.append({
+                "object": "block",
+                "type": "bulleted_list_item",
+                "bulleted_list_item": {"rich_text": [_rt(line)]}
+            })
+
+    if len(blocks) <= 2:
+        blocks.append({
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {"rich_text": [_rt("이번 주에 저장할 플랜이 없어요.")]},
+        })
+    return blocks[:100]
+
+def notion_create_week_page(token: str, db_id: str, title_prop: str, week_label: str, wk: str, tasks: List[Dict[str, Any]]) -> str:
+    title = f"{week_label} · Bloom U 플랜"
+
+    # ✅ Notion DB마다 Title property 이름이 다를 수 있어서 사용자 입력값(title_prop)을 사용
+    properties = {
+        title_prop: {"title": [_rt(title)]}
+    }
+    # 아래 2개는 DB에 동일한 속성이 없으면 에러날 수 있어서 "옵션"으로 처리하지 않고 본문(children)에만 기록
+    # 필요하면 사용자가 DB에 WeekKey/WeekLabel 속성을 만들어서 추가하도록 안내하는 방식이 안전함.
+
+    payload = {
+        "parent": {"database_id": db_id},
+        "properties": properties,
+        "children": build_week_plan_blocks(week_label, wk, tasks),
+    }
+
+    r = requests.post("https://api.notion.com/v1/pages", headers=notion_headers(token), json=payload, timeout=25)
+    if r.status_code >= 300:
+        raise RuntimeError(f"Notion 저장 실패: {r.status_code} - {r.text}")
+
+    return (r.json() or {}).get("url", "")
+
+
+# =========================
 # App UI
 # =========================
 st.set_page_config(page_title=f"{APP_NAME} - 상담/코칭 AI", page_icon="🌸", layout="wide")
@@ -480,18 +616,40 @@ st.session_state.settings.update({
     "nickname": nickname,
 })
 
-TAB_CHAT = "채팅"
-TAB_PLAN = "주간 액티브 플랜"
-TAB_AB = "전략 A/B 측정"
-TAB_BADGE = "뱃지"
-TAB_SURVEY = "주간 자가설문"
-TAB_DASH = "주간 리포트/성장 대시보드"
-
-tab = st.sidebar.radio("탭", [TAB_CHAT, TAB_PLAN, TAB_AB, TAB_BADGE, TAB_SURVEY, TAB_DASH], index=0)
+tab = st.sidebar.radio(
+    "탭",
+    ["채팅", "주간 액티브 플랜", "전략 A/B 측정", "뱃지", "주간 자가설문", "주간 리포트/성장 대시보드"],
+    index=0
+)
 
 st.sidebar.divider()
 st.sidebar.caption(f"타겟 사용자: {TARGET}")
 st.sidebar.caption("팁: ‘목표/기한/제약/현재 상태’를 구체적으로 적을수록 플랜이 좋아져요.")
+
+# ✅ Notion 연결(사용자 입력 방식)
+st.sidebar.markdown("### 🔗 Notion 연결(사용자)")
+st.sidebar.caption("사용자 본인의 Notion에 저장하려면 토큰/DB ID를 입력해야 해요.")
+st.session_state.notion["token"] = st.sidebar.text_input(
+    "Notion Token (사용자)",
+    type="password",
+    value=st.session_state.notion.get("token", ""),
+    placeholder="secret_..."
+).strip()
+st.session_state.notion["db_id"] = st.sidebar.text_input(
+    "Notion Database ID (사용자)",
+    value=st.session_state.notion.get("db_id", ""),
+    placeholder="예: 0123abcd..."
+).strip()
+st.session_state.notion["title_prop"] = st.sidebar.text_input(
+    "DB Title 속성 이름(보통 Name/제목)",
+    value=st.session_state.notion.get("title_prop", "Name"),
+    placeholder="예: Name"
+).strip() or "Name"
+
+if notion_ready():
+    st.sidebar.success("Notion 연결 입력 완료 ✅")
+else:
+    st.sidebar.info("Notion 저장 기능을 쓰려면 토큰 + DB ID가 필요해요.")
 
 # Header
 st.title(f"🌸 {APP_NAME}")
@@ -502,7 +660,7 @@ st.caption(ONE_LINER)
 # =========================
 # Tab: Chat
 # =========================
-if tab == TAB_CHAT:
+if tab == "채팅":
     st.subheader("💬 상담/코칭 챗")
 
     for m in st.session_state.messages:
@@ -523,6 +681,7 @@ if tab == TAB_CHAT:
                 st.error("사이드바에 OpenAI API Key를 넣어야 해요.")
             st.stop()
 
+        # Evidence pool
         sources_pool = []
         if evidence_mode:
             serper_key = st.secrets.get("SERPER_API_KEY", "")
@@ -548,7 +707,8 @@ if tab == TAB_CHAT:
         personal_context = []
         if survey:
             personal_context.append(
-                f"[이번 주 자가설문] 자신감={survey.get('confidence')}/10, 불안={survey.get('anxiety')}/10, 에너지={survey.get('energy')}/10, 메모={survey.get('notes','')}"
+                f"[이번 주 자가설문] 자신감={survey.get('confidence')}/10, 불안={survey.get('anxiety')}/10, "
+                f"에너지={survey.get('energy')}/10, 메모={survey.get('notes','')}"
             )
         if metrics:
             a = metrics.get("A", {})
@@ -563,6 +723,8 @@ if tab == TAB_CHAT:
             + ("\n".join(personal_context) + "\n\n" if personal_context else "")
             + f"사용자 메시지:\n{user}"
         )
+
+        # ✅ tone option이 실제 말투에 반영되도록 system prompt에 강제 주입됨(build_system_prompt)
         sys_prompt = build_system_prompt(st.session_state.settings)
 
         with st.chat_message("assistant"):
@@ -574,10 +736,12 @@ if tab == TAB_CHAT:
                 st.error(f"AI 응답 처리 실패(형식 오류/네트워크): {e}")
                 st.stop()
 
+            # save plan
             st.session_state.active_plan["week"] = wk
             st.session_state.active_plan["planA"] = (ans.get("ab_plans", {}).get("A", {}) or {}).get("steps", []) or []
             st.session_state.active_plan["planB"] = (ans.get("ab_plans", {}).get("B", {}) or {}).get("steps", []) or []
 
+            # 이번 주 생성 플랜 덮어쓰기
             st.session_state.plan_by_week[wk] = [ensure_task_shape(t, wk) for t in ans.get("weekly_active_plan", [])]
 
             render_ai_answer(ans, evidence_mode)
@@ -594,9 +758,9 @@ if tab == TAB_CHAT:
 
 
 # =========================
-# Tab: Active Plan
+# Tab: Weekly Active Plan (Calendar + Filters + Notion Export)
 # =========================
-elif tab == TAB_PLAN:
+elif tab == "주간 액티브 플랜":
     st.subheader("🗓️ 주간 액티브 플랜 (달력)")
 
     all_weeks = sorted(set([week_key()] + list(st.session_state.plan_by_week.keys())))
@@ -616,6 +780,28 @@ elif tab == TAB_PLAN:
     label = week_label_yy_mm_ww_from_week_start(week_start)
     st.write(f"주차: **{label}**  (키: {chosen_wk})")
 
+    st.markdown("### 📤 Notion으로 내보내기")
+    st.caption("선택한 주차의 플랜을 사용자의 Notion Database에 ‘페이지 1개’로 저장합니다.")
+    exp_col1, exp_col2 = st.columns([0.60, 0.40])
+    with exp_col1:
+        st.info("Notion DB에 Integration을 Share 했는지 확인해요. Share가 없으면 저장이 실패해요.")
+    with exp_col2:
+        if st.button("Notion에 저장", use_container_width=True, disabled=not notion_ready()):
+            try:
+                tok = st.session_state.notion["token"].strip()
+                dbid = st.session_state.notion["db_id"].strip()
+                title_prop = st.session_state.notion["title_prop"].strip() or "Name"
+                tasks = st.session_state.plan_by_week.get(chosen_wk, []) or []
+                page_url = notion_create_week_page(tok, dbid, title_prop, label, chosen_wk, tasks)
+                st.success("Notion 저장 완료 ✅")
+                if page_url:
+                    st.markdown(f"- 저장된 페이지: {page_url}")
+            except Exception as e:
+                st.error(f"Notion 저장 실패: {e}")
+
+    st.divider()
+
+    # Filters
     st.markdown("### 보기 옵션")
     c1, c2, c3 = st.columns([0.38, 0.32, 0.30])
     with c1:
@@ -640,9 +826,6 @@ elif tab == TAB_PLAN:
     st.caption("체크박스 = ‘체크’ 토글 / 상태 선택 = 체크·진행중·미루기 / ‘미루기’ 선택 시 자동으로 다음 요일(또는 다음 주)로 이동")
 
     cols = st.columns(7)
-    days_to_render = DAYS
-    if show_only_today:
-        days_to_render = [IDX_TO_DAY.get(today().weekday(), "월")]
 
     def get_day_items(day_label: str) -> List[Dict[str, Any]]:
         items = [t for t in st.session_state.plan_by_week.get(chosen_wk, []) if t.get("day") == day_label]
@@ -651,13 +834,20 @@ elif tab == TAB_PLAN:
             items = sort_tasks_for_day(items)
         return items
 
+    days_to_render = DAYS
+    if show_only_today:
+        days_to_render = [IDX_TO_DAY.get(today().weekday(), "월")]
+
     for i, d in enumerate(DAYS):
         with cols[i]:
             date_i = week_start + dt.timedelta(days=i)
             date_label = date_i.strftime("%m/%d")
             is_today_col = (date_i == today())
 
-            st.markdown(f"#### {d} · {date_label}{' ⭐' if is_today_col else ''}")
+            if is_today_col:
+                st.markdown(f"#### {d} · {date_label} ⭐")
+            else:
+                st.markdown(f"#### {d} · {date_label}")
 
             if show_only_today and d not in days_to_render:
                 st.caption(" ")
@@ -697,8 +887,10 @@ elif tab == TAB_PLAN:
                     else:
                         item["status"] = selected_status
 
+                # Auto-reschedule when switched to '미루기'
                 if item["status"] == "미루기" and prev_status != "미루기":
                     cur_list = st.session_state.plan_by_week.get(chosen_wk, []) or []
+
                     removed = False
                     for idx in range(len(cur_list) - 1, -1, -1):
                         t = cur_list[idx]
@@ -712,6 +904,7 @@ elif tab == TAB_PLAN:
                             if t.get("task") == item.get("task") and t.get("day") == item.get("day"):
                                 cur_list.pop(idx)
                                 break
+
                     st.session_state.plan_by_week[chosen_wk] = cur_list
 
                     moved = dict(item)
@@ -766,18 +959,13 @@ elif tab == TAB_PLAN:
 
 
 # =========================
-# Tab: A/B Metrics (✅ 저장 버튼 + 저장됨 메시지)
+# Tab: A/B Metrics (✅ 저장 버튼 + success 메시지)
 # =========================
-elif tab == TAB_AB:
+elif tab == "전략 A/B 측정":
     st.subheader("🧪 전략A/B 플랜 측정 (다음 코칭에 반영)")
     wk = st.session_state.active_plan.get("week", week_key())
     week_start = week_start_from_key(wk)
     st.write(f"주차: **{week_label_yy_mm_ww_from_week_start(week_start)}**  (키: {wk})")
-
-    # ✅ 저장됨 메시지를 '저장 버튼 눌렀을 때만' 띄우기
-    if st.session_state.ab_saved_notice:
-        st.success("저장됨! 다음에 ‘채팅’에서는 답변을 더 개인맞춤형으로 해드릴게요.")
-        st.session_state.ab_saved_notice = False
 
     if wk not in st.session_state.ab_metrics:
         st.session_state.ab_metrics[wk] = {
@@ -785,56 +973,47 @@ elif tab == TAB_AB:
             "B": {"anxiety": 5, "execution": 50, "outcome": "", "notes": ""},
         }
 
-    # ✅ form으로 묶어서 "저장" 눌렀을 때만 값 반영 + 메시지
-    with st.form(key=f"ab_form_{wk}"):
-        for plan_id in ["A", "B"]:
-            st.markdown(f"#### 플랜 {plan_id}")
-            c1, c2 = st.columns(2)
-            with c1:
-                anxiety = st.slider(
-                    f"불안도(0~10) - {plan_id}", 0, 10,
-                    st.session_state.ab_metrics[wk][plan_id]["anxiety"],
-                    key=f"ab_anx_{wk}_{plan_id}"
-                )
-                execution = st.slider(
-                    f"실천도(%) - {plan_id}", 0, 100,
-                    st.session_state.ab_metrics[wk][plan_id]["execution"],
-                    key=f"ab_exec_{wk}_{plan_id}"
-                )
-            with c2:
-                outcome = st.text_input(
-                    f"결과물/성과 - {plan_id}",
-                    value=st.session_state.ab_metrics[wk][plan_id]["outcome"],
-                    key=f"ab_out_{wk}_{plan_id}"
-                )
-                notes = st.text_area(
-                    f"메모 - {plan_id}",
-                    value=st.session_state.ab_metrics[wk][plan_id]["notes"],
-                    key=f"ab_note_{wk}_{plan_id}"
-                )
+    # 입력 UI
+    for plan_id in ["A", "B"]:
+        with st.expander(f"플랜 {plan_id} 기록", expanded=(plan_id == "A")):
+            anxiety = st.slider(
+                "불안도(0~10)", 0, 10, st.session_state.ab_metrics[wk][plan_id]["anxiety"],
+                key=f"ab_anx_{wk}_{plan_id}"
+            )
+            execution = st.slider(
+                "실천도(%)", 0, 100, st.session_state.ab_metrics[wk][plan_id]["execution"],
+                key=f"ab_exec_{wk}_{plan_id}"
+            )
+            outcome = st.text_input(
+                "결과물/성과", value=st.session_state.ab_metrics[wk][plan_id]["outcome"],
+                key=f"ab_out_{wk}_{plan_id}"
+            )
+            notes = st.text_area(
+                "메모", value=st.session_state.ab_metrics[wk][plan_id]["notes"],
+                key=f"ab_note_{wk}_{plan_id}"
+            )
 
-            # 임시 저장(아직 확정 X) -> 제출 시 반영
-            st.session_state.ab_metrics[wk][plan_id] = {
-                "anxiety": anxiety,
-                "execution": execution,
-                "outcome": outcome,
-                "notes": notes,
-            }
-
-            st.divider()
-
-        submitted = st.form_submit_button("저장", use_container_width=True)
-
-    if submitted:
-        # form에서는 위에서 이미 session_state에 값이 반영되어 있음
-        st.session_state.ab_saved_notice = True
-        st.rerun()
+    # ✅ “저장” 버튼을 눌러야 저장 + 메시지 뜨게 수정
+    if st.button("저장", use_container_width=True):
+        st.session_state.ab_metrics[wk]["A"] = {
+            "anxiety": st.session_state.get(f"ab_anx_{wk}_A"),
+            "execution": st.session_state.get(f"ab_exec_{wk}_A"),
+            "outcome": st.session_state.get(f"ab_out_{wk}_A", ""),
+            "notes": st.session_state.get(f"ab_note_{wk}_A", ""),
+        }
+        st.session_state.ab_metrics[wk]["B"] = {
+            "anxiety": st.session_state.get(f"ab_anx_{wk}_B"),
+            "execution": st.session_state.get(f"ab_exec_{wk}_B"),
+            "outcome": st.session_state.get(f"ab_out_{wk}_B", ""),
+            "notes": st.session_state.get(f"ab_note_{wk}_B", ""),
+        }
+        st.success("저장됨! 다음에 ‘채팅’에서는 답변을 더 개인맞춤형으로 해드릴게요.")
 
 
 # =========================
 # Tab: Badges
 # =========================
-elif tab == TAB_BADGE:
+elif tab == "뱃지":
     st.subheader("🏅 뱃지 시스템")
     unlock_badges()
 
@@ -852,7 +1031,7 @@ elif tab == TAB_BADGE:
 # =========================
 # Tab: Weekly Survey
 # =========================
-elif tab == TAB_SURVEY:
+elif tab == "주간 자가설문":
     st.subheader("📝 주간 자가설문(자신감 지수)")
     wk = week_key()
     week_start = week_start_from_key(wk)
@@ -880,7 +1059,7 @@ elif tab == TAB_SURVEY:
 # =========================
 # Tab: Weekly Report / Dashboard
 # =========================
-elif tab == TAB_DASH:
+elif tab == "주간 리포트/성장 대시보드":
     st.subheader("📊 주간 레포트 & 성장 시각화 대시보드")
 
     weeks = sorted(set(list(st.session_state.survey.keys()) + list(st.session_state.ab_metrics.keys()) + list(st.session_state.plan_by_week.keys())))
@@ -939,9 +1118,3 @@ elif tab == TAB_DASH:
     st.write("\n".join(bullets) if bullets else "이번 주 데이터가 아직 충분하지 않아요.")
 
     st.caption("팁: A/B 측정값과 주간 설문을 꾸준히 쌓으면 ‘나에게 맞는 전략’이 더 정확해져요.")
-
-
-else:
-    st.error(f"탭 분기 매칭 실패: {tab}")
-    st.caption("sidebar.radio 옵션 문자열과 if/elif 비교 문자열이 완전히 동일해야 합니다.")
-

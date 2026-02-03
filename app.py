@@ -57,26 +57,22 @@ def week_key(d: Optional[dt.date] = None) -> str:
     return f"{y}-W{w:02d}"
 
 def week_start_from_key(wk: str) -> dt.date:
-    # wk: "YYYY-Www"
     try:
         y_str, w_str = wk.split("-W")
         y = int(y_str)
         w = int(w_str)
-        return dt.date.fromisocalendar(y, w, 1)  # Monday
+        return dt.date.fromisocalendar(y, w, 1)
     except Exception:
-        # fallback: current week
         y, w, _ = today().isocalendar()
         return dt.date.fromisocalendar(y, w, 1)
 
 def week_of_month(d: dt.date) -> int:
-    # "월의 N주"를 Monday-start 주차로 계산
     first = d.replace(day=1)
     first_monday = first - dt.timedelta(days=first.weekday())
     this_monday = d - dt.timedelta(days=d.weekday())
     return (this_monday - first_monday).days // 7 + 1
 
 def week_label_yy_mm_ww_from_week_start(week_start: dt.date) -> str:
-    # week_start를 기준으로 "YY년 MM월 WW주"
     yy = week_start.year % 100
     mm = week_start.month
     ww = week_of_month(week_start)
@@ -101,12 +97,10 @@ def normalize_day_label(day: str) -> str:
     return d if d in DAYS else ""
 
 def task_uid(task: str, day: str, wk: str) -> str:
-    # 안정적인 키: task 텍스트 기반 hash + day + wk
     h = abs(hash((task or "").strip())) % 1_000_000
     return f"{wk}_{day}_{h}"
 
 def ensure_task_shape(t: Dict[str, Any], wk: str) -> Dict[str, Any]:
-    # 과거 호환: done -> status, week 누락시 wk로 채우기
     out = {
         "week": t.get("week") or wk,
         "day": normalize_day_label(t.get("day") or ""),
@@ -124,12 +118,6 @@ def ensure_task_shape(t: Dict[str, Any], wk: str) -> Dict[str, Any]:
     return out
 
 def move_task_to_next_slot(t: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    '미루기' 선택 시:
-    - day가 월~토: 다음 요일로 이동 (week 유지)
-    - day가 일: 다음 주 월로 이동 (week +1)
-    - day가 비어있으면: 이번 주 '월'로 배치 (week 유지)
-    """
     wk = t.get("week") or week_key()
     day = normalize_day_label(t.get("day") or "")
     if not day:
@@ -142,7 +130,6 @@ def move_task_to_next_slot(t: Dict[str, Any]) -> Dict[str, Any]:
         t["week"] = wk
         return t
 
-    # Sunday -> next week Monday
     start = week_start_from_key(wk)
     next_start = start + dt.timedelta(days=7)
     t["week"] = week_key(next_start)
@@ -206,11 +193,7 @@ def ensure_state():
     if "plan_by_week" not in st.session_state:
         st.session_state.plan_by_week = {}
     if "active_plan" not in st.session_state:
-        st.session_state.active_plan = {
-            "week": week_key(),
-            "planA": [],
-            "planB": [],
-        }
+        st.session_state.active_plan = {"week": week_key(), "planA": [], "planB": []}
     if "ab_metrics" not in st.session_state:
         st.session_state.ab_metrics = {}
     if "survey" not in st.session_state:
@@ -219,6 +202,9 @@ def ensure_state():
         st.session_state.badges_unlocked = set()
     if "usage" not in st.session_state:
         st.session_state.usage = {"last_active": None, "streak": 0}
+    # ✅ A/B 저장 알림 플래그 (이번 요청 핵심)
+    if "ab_saved_notice" not in st.session_state:
+        st.session_state.ab_saved_notice = False
 
 
 # =========================
@@ -494,7 +480,6 @@ st.session_state.settings.update({
     "nickname": nickname,
 })
 
-# ✅ 탭 문자열을 “radio 옵션”과 “if/elif 비교”에서 완전히 동일하게 유지
 TAB_CHAT = "채팅"
 TAB_PLAN = "주간 액티브 플랜"
 TAB_AB = "전략 A/B 측정"
@@ -502,11 +487,7 @@ TAB_BADGE = "뱃지"
 TAB_SURVEY = "주간 자가설문"
 TAB_DASH = "주간 리포트/성장 대시보드"
 
-tab = st.sidebar.radio(
-    "탭",
-    [TAB_CHAT, TAB_PLAN, TAB_AB, TAB_BADGE, TAB_SURVEY, TAB_DASH],
-    index=0
-)
+tab = st.sidebar.radio("탭", [TAB_CHAT, TAB_PLAN, TAB_AB, TAB_BADGE, TAB_SURVEY, TAB_DASH], index=0)
 
 st.sidebar.divider()
 st.sidebar.caption(f"타겟 사용자: {TARGET}")
@@ -785,7 +766,7 @@ elif tab == TAB_PLAN:
 
 
 # =========================
-# Tab: A/B Metrics
+# Tab: A/B Metrics (✅ 저장 버튼 + 저장됨 메시지)
 # =========================
 elif tab == TAB_AB:
     st.subheader("🧪 전략A/B 플랜 측정 (다음 코칭에 반영)")
@@ -793,19 +774,46 @@ elif tab == TAB_AB:
     week_start = week_start_from_key(wk)
     st.write(f"주차: **{week_label_yy_mm_ww_from_week_start(week_start)}**  (키: {wk})")
 
+    # ✅ 저장됨 메시지를 '저장 버튼 눌렀을 때만' 띄우기
+    if st.session_state.ab_saved_notice:
+        st.success("저장됨! 다음에 ‘채팅’에서는 답변을 더 개인맞춤형으로 해드릴게요.")
+        st.session_state.ab_saved_notice = False
+
     if wk not in st.session_state.ab_metrics:
         st.session_state.ab_metrics[wk] = {
             "A": {"anxiety": 5, "execution": 50, "outcome": "", "notes": ""},
             "B": {"anxiety": 5, "execution": 50, "outcome": "", "notes": ""},
         }
 
-    for plan_id in ["A", "B"]:
-        with st.expander(f"플랜 {plan_id} 기록", expanded=(plan_id == "A")):
-            anxiety = st.slider("불안도(0~10)", 0, 10, st.session_state.ab_metrics[wk][plan_id]["anxiety"], key=f"ab_anx_{wk}_{plan_id}")
-            execution = st.slider("실천도(%)", 0, 100, st.session_state.ab_metrics[wk][plan_id]["execution"], key=f"ab_exec_{wk}_{plan_id}")
-            outcome = st.text_input("결과물/성과", value=st.session_state.ab_metrics[wk][plan_id]["outcome"], key=f"ab_out_{wk}_{plan_id}")
-            notes = st.text_area("메모", value=st.session_state.ab_metrics[wk][plan_id]["notes"], key=f"ab_note_{wk}_{plan_id}")
+    # ✅ form으로 묶어서 "저장" 눌렀을 때만 값 반영 + 메시지
+    with st.form(key=f"ab_form_{wk}"):
+        for plan_id in ["A", "B"]:
+            st.markdown(f"#### 플랜 {plan_id}")
+            c1, c2 = st.columns(2)
+            with c1:
+                anxiety = st.slider(
+                    f"불안도(0~10) - {plan_id}", 0, 10,
+                    st.session_state.ab_metrics[wk][plan_id]["anxiety"],
+                    key=f"ab_anx_{wk}_{plan_id}"
+                )
+                execution = st.slider(
+                    f"실천도(%) - {plan_id}", 0, 100,
+                    st.session_state.ab_metrics[wk][plan_id]["execution"],
+                    key=f"ab_exec_{wk}_{plan_id}"
+                )
+            with c2:
+                outcome = st.text_input(
+                    f"결과물/성과 - {plan_id}",
+                    value=st.session_state.ab_metrics[wk][plan_id]["outcome"],
+                    key=f"ab_out_{wk}_{plan_id}"
+                )
+                notes = st.text_area(
+                    f"메모 - {plan_id}",
+                    value=st.session_state.ab_metrics[wk][plan_id]["notes"],
+                    key=f"ab_note_{wk}_{plan_id}"
+                )
 
+            # 임시 저장(아직 확정 X) -> 제출 시 반영
             st.session_state.ab_metrics[wk][plan_id] = {
                 "anxiety": anxiety,
                 "execution": execution,
@@ -813,7 +821,14 @@ elif tab == TAB_AB:
                 "notes": notes,
             }
 
-    st.success("저장됨! 다음에 ‘채팅’에서는 답변을 더 개인맞춤형으로 해드릴게요.")
+            st.divider()
+
+        submitted = st.form_submit_button("저장", use_container_width=True)
+
+    if submitted:
+        # form에서는 위에서 이미 session_state에 값이 반영되어 있음
+        st.session_state.ab_saved_notice = True
+        st.rerun()
 
 
 # =========================
@@ -926,9 +941,7 @@ elif tab == TAB_DASH:
     st.caption("팁: A/B 측정값과 주간 설문을 꾸준히 쌓으면 ‘나에게 맞는 전략’이 더 정확해져요.")
 
 
-# =========================
-# Safety net: unmatched tab
-# =========================
 else:
     st.error(f"탭 분기 매칭 실패: {tab}")
     st.caption("sidebar.radio 옵션 문자열과 if/elif 비교 문자열이 완전히 동일해야 합니다.")
+

@@ -499,7 +499,7 @@ st.session_state.settings.update({
     "nickname": nickname,
 })
 
-tab = st.sidebar.radio("탭", ["채팅", "주간 액티브 플랜", "전략A/B 측정", "뱃지", "주간 자가설문", "주간 리포트/성장 대시보드"], index=0)
+tab = st.sidebar.radio("탭", ["채팅", "주간 액티브 플랜", "전략 A/B 측정", "뱃지", "주간 자가설문", "주간 리포트/성장 대시보드"], index=0)
 
 st.sidebar.divider()
 st.sidebar.caption(f"타겟 사용자: {TARGET}")
@@ -567,7 +567,7 @@ if tab == "채팅":
             a = metrics.get("A", {})
             b = metrics.get("B", {})
             personal_context.append(
-                f"[A/B 측정] A(불안={a.get('anxiety')}, 실천={a.get('execution')}%, 성과={a.get('outcome','')}); "
+                f"[전략 A/B 측정] A(불안={a.get('anxiety')}, 실천={a.get('execution')}%, 성과={a.get('outcome','')}); "
                 f"B(불안={b.get('anxiety')}, 실천={b.get('execution')}%, 성과={b.get('outcome','')})"
             )
 
@@ -777,14 +777,14 @@ elif tab == "액티브 플랜":
     unlock_badges()
 
     st.divider()
-    st.markdown("### 플랜 A / B(코칭에서 생성됨)")
+    st.markdown("### 전략 A / B(코칭에서 생성됨)")
     c1, c2 = st.columns(2)
     with c1:
-        st.write("**플랜 A**")
+        st.write("**전략 A**")
         for x in st.session_state.active_plan.get("planA", [])[:10]:
             st.write(f"- {x}")
     with c2:
-        st.write("**플랜 B**")
+        st.write("**전략 B**")
         for x in st.session_state.active_plan.get("planB", [])[:10]:
             st.write(f"- {x}")
 
@@ -817,7 +817,7 @@ elif tab == "액티브 플랜":
 # Tab: A/B Metrics
 # =========================
 elif tab == "A/B 측정":
-    st.subheader("🧪 A/B 플랜 측정 (다음 코칭에 반영)")
+    st.subheader("🧪 전략A/B 플랜 측정 (다음 코칭에 반영)")
     wk = st.session_state.active_plan.get("week", week_key())
     week_start = week_start_from_key(wk)
     st.write(f"주차: **{week_label_yy_mm_ww_from_week_start(week_start)}**  (키: {wk})")
@@ -894,7 +894,7 @@ elif tab == "주간 설문":
 # =========================
 # Tab: Weekly Report / Dashboard
 # =========================
-elif tab == "주간 리포트/대시보드":
+elif tab == "주간 리포트/성장 대시보드":
     st.subheader("📊 주간 레포트 & 성장 시각화 대시보드")
 
     weeks = sorted(set(list(st.session_state.survey.keys()) + list(st.session_state.ab_metrics.keys()) + list(st.session_state.plan_by_week.keys())))
@@ -953,3 +953,4 @@ elif tab == "주간 리포트/대시보드":
     st.write("\n".join(bullets) if bullets else "이번 주 데이터가 아직 충분하지 않아요.")
 
     st.caption("팁: A/B 측정값과 주간 설문을 꾸준히 쌓으면 ‘나에게 맞는 전략’이 더 정확해져요.")
+

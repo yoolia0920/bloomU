@@ -641,7 +641,7 @@ domain = st.sidebar.selectbox("상담 분야", DOMAIN_OPTIONS, index=DOMAIN_OPTI
 evidence_mode = st.sidebar.toggle("증거기반모드(사실/정보에 근거 링크)", value=st.session_state.settings["evidence_mode"])
 
 anonymous_mode = st.sidebar.toggle("익명모드", value=st.session_state.settings["anonymous_mode"])
-nickname_default = "익명" if anonymous_mode else st.session_state.settings["nickname"] or "율"
+nickname_default = "익명" if anonymous_mode else st.session_state.settings["nickname"] or "user"
 nickname = st.sidebar.text_input("닉네임(챗봇이 이 이름으로 불러요)", value=nickname_default).strip() or "익명"
 
 st.session_state.settings.update({
@@ -1157,3 +1157,4 @@ elif tab == "주간 리포트/성장 대시보드":
     st.write("\n".join(bullets) if bullets else "이번 주 데이터가 아직 충분하지 않아요.")
 
     st.caption("팁: A/B 측정값과 주간 설문을 꾸준히 쌓으면 ‘나에게 맞는 전략’이 더 정확해져요.")
+

@@ -254,12 +254,16 @@ def ensure_state():
             "db_id": "",
             "title_prop": "Name",  # 사용자 DB의 Title property 이름
         }
-    # ✅ 데일리 패턴 체크 저장소 (날짜별로 누적)
-    # 키: "YYYY-MM-DD"
-    # 값: {water:int(1~5), exercise:int(1~5), sleep:int(1~5), condition:int(1~5), extra_label:str, extra:int(1~5), memo:str}
-    if "daily_pattern" not in st.session_state:
+        # ✅ 데일리 패턴 체크 저장소 (날짜별 누적)
+    # (호환) daily_pattern / daily_patterns 둘 다 지원
+    if "daily_pattern" not in st.session_state and "daily_patterns" not in st.session_state:
         st.session_state.daily_pattern = {}
 
+    # 누군가 daily_patterns를 쓰는 경우도 있어 동기화
+    if "daily_patterns" not in st.session_state:
+        st.session_state.daily_patterns = st.session_state.daily_pattern
+    else:
+        st.session_state.daily_pattern = st.session_state.daily_patterns
 
 # =========================
 # ✅ NEW: Weekly Plan Merge (누적 저장 + 중복 방지)
@@ -1176,11 +1180,15 @@ elif tab == "주간 리포트/성장 대시보드":
 # =========================
 elif tab == "데일리 패턴 체크":
 
-    st.subheader("📅 데일리 패턴 체크")
+    # ✅ 안전 초기화
+    if "daily_patterns" not in st.session_state:
+        st.session_state.daily_patterns = {}
+
+    st.subheader("📊 데일리 패턴 체크")
 
     today_str = today().isoformat()
 
-    st.caption("오늘 하루의 패턴을 기록해서 나만의 루틴을 만들어요.")
+    st.caption("오늘 하루의 패턴을 기록해서 나만의 루틴을 만들어보세요.")
 
     # 기본값
     cur = st.session_state.daily_patterns.get(
@@ -1200,17 +1208,12 @@ elif tab == "데일리 패턴 체크":
     water = st.slider("💧 수분 섭취", 1, 5, cur["water"])
     exercise = st.slider("🏃 운동량", 1, 5, cur["exercise"])
     sleep = st.slider("😴 수면 만족도", 1, 5, cur["sleep"])
-    condition = st.slider("🙂 데일리 컨디션", 1, 5, cur["condition"])
-    custom = st.slider("⭐ 개인 목표(자율)", 1, 5, cur["custom"])
+    condition = st.slider("🙂 컨디션", 1, 5, cur["condition"])
+    custom = st.slider("⭐ 개인 목표", 1, 5, cur["custom"])
 
-    memo = st.text_area(
-        "📝 메모 (선택)",
-        value=cur.get("memo", ""),
-        placeholder="예: 오늘은 잠은 적었지만 집중 잘 됐다."
-    )
+    memo = st.text_area("📝 메모", value=cur["memo"])
 
-    # 저장 버튼
-    if st.button("오늘 기록 저장", use_container_width=True):
+    if st.button("💾 오늘 기록 저장", use_container_width=True):
 
         st.session_state.daily_patterns[today_str] = {
             "water": water,
@@ -1222,84 +1225,38 @@ elif tab == "데일리 패턴 체크":
             "saved_at": dt.datetime.now().isoformat()
         }
 
-        st.success("오늘 패턴이 저장됐어요 ✅")
+        st.success("오늘 패턴이 저장됐어요! ✅")
 
     st.divider()
 
-    # ======================
-    # 📊 통계 보기
-    # ======================
-
-    st.markdown("## 📊 패턴 통계")
+    # =====================
+    # 📈 통계 보기
+    # =====================
+    st.markdown("### 📈 누적 통계")
 
     if not st.session_state.daily_patterns:
-        st.info("아직 기록이 없어요. 오늘부터 시작해보세요!")
-        st.stop()
+        st.info("아직 저장된 기록이 없어요.")
+    else:
+        df = pd.DataFrame.from_dict(
+            st.session_state.daily_patterns,
+            orient="index"
+        )
 
-    # DataFrame 변환
-    rows = []
+        df.index = pd.to_datetime(df.index)
 
-    for d, v in st.session_state.daily_patterns.items():
-        row = {"date": d}
-        row.update(v)
-        rows.append(row)
+        # 월간 평균
+        monthly = df.resample("M").mean(numeric_only=True)
 
-    df = pd.DataFrame(rows)
-    df["date"] = pd.to_datetime(df["date"])
-    df["year"] = df["date"].dt.year
-    df["month"] = df["date"].dt.to_period("M").astype(str)
+        # 연간 평균
+        yearly = df.resample("Y").mean(numeric_only=True)
 
-    # ======================
-    # 📅 월간 요약
-    # ======================
-    st.markdown("### 📆 월간 평균")
+        st.markdown("#### 📅 월간 평균")
+        st.dataframe(monthly.round(2), use_container_width=True)
 
-    monthly = (
-        df
-        .groupby("month")[["water", "exercise", "sleep", "condition", "custom"]]
-        .mean()
-        .round(2)
-    )
+        st.markdown("#### 📆 연간 평균")
+        st.dataframe(yearly.round(2), use_container_width=True)
 
-    st.dataframe(monthly, use_container_width=True)
-
-    st.line_chart(monthly)
-
-    st.divider()
-
-    # ======================
-    # 📈 연간 요약
-    # ======================
-    st.markdown("### 📈 연간 평균")
-
-    yearly = (
-        df
-        .groupby("year")[["water", "exercise", "sleep", "condition", "custom"]]
-        .mean()
-        .round(2)
-    )
-
-    st.dataframe(yearly, use_container_width=True)
-
-    st.line_chart(yearly)
-
-    st.divider()
-
-    # ======================
-    # 📖 최근 기록
-    # ======================
-    st.markdown("### 🗂️ 최근 기록")
-
-    recent = df.sort_values("date", ascending=False).head(14)
-
-    for _, r in recent.iterrows():
-
-        with st.expander(f"📅 {r['date'].date()}"):
-            st.write(f"💧 수분: {r['water']} / 5")
-            st.write(f"🏃 운동: {r['exercise']} / 5")
-            st.write(f"😴 수면: {r['sleep']} / 5")
-            st.write(f"🙂 컨디션: {r['condition']} / 5")
-            st.write(f"⭐ 개인: {r['custom']} / 5")
-
-            if r.get("memo"):
-                st.caption(f"📝 {r['memo']}")
+        st.markdown("#### 📊 추이 그래프")
+        st.line_chart(
+            df[["water", "exercise", "sleep", "condition", "custom"]]
+        )

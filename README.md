@@ -61,10 +61,11 @@ Bloom U는 20대 대학생을 위한 상담 · 목표관리 · 루틴관리 · �
   ※ 이 앱은 기본적으로 OpenAI API Key가 필요합니다.
      또한 “증거기반 모드(Serper)”를 쓰려면 Serper API Key가 있으면 좋아요(없어도 동작은 합니다. 대신 큐레이션 링크를 사용).
 
----
+
 
 #📝 Notion 저장 기능 사용법 (선택 기능)
-Bloom U는 사용자의 주간 플랜을 사용자 본인의 Notion Database에 저장할 수 있습니다. 사이드바에서 Notion Token, Database ID, Title 속성 이름을 입력하면 됩니다.
+
+  : Bloom U는 사용자의 주간 플랜을 사용자 본인의 Notion Database에 저장할 수 있습니다. 사이드바에서 Notion Token, Database ID, Title 속성 이름을 입력하면 됩니다.
 
  1️⃣ Notion Integration 생성
    1. Notion에서 Settings & members → Integrations(또는 Notion Developers)로 이동 후 New Integration 생성

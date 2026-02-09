@@ -137,6 +137,7 @@ def ensure_task_shape(t: Dict[str, Any], wk: str) -> Dict[str, Any]:
         "day": normalize_day_label(t.get("day") or ""),
         "task": (t.get("task") or "").strip(),
         "status": (t.get("status") or "").strip(),
+        "hidden": bool(t.get("hidden", False)),
         "created_at": t.get("created_at") or dt.datetime.now().isoformat(),
     }
     if not out["status"]:
@@ -1004,7 +1005,7 @@ elif tab == "주간 액티브 플랜":
 
     # Filters
     st.markdown("### 보기 옵션")
-    c1, c2, c3 = st.columns([0.38, 0.32, 0.30])
+    c1, c2, c3, c4 = st.columns([0.30, 0.26, 0.22, 0.22])
     with c1:
         status_filter = st.multiselect(
             "상태 필터",
@@ -1016,6 +1017,8 @@ elif tab == "주간 액티브 플랜":
         show_only_today = st.toggle("오늘 요일만 보기", value=False)
     with c3:
         show_sort = st.toggle("상태별 자동 정렬(진행중→미루기→체크)", value=True)
+    with c4:
+        show_hidden = st.toggle("숨김 포함 보기", value=False)
 
     st.divider()
 
@@ -1031,6 +1034,8 @@ elif tab == "주간 액티브 플랜":
     def get_day_items(day_label: str) -> List[Dict[str, Any]]:
         items = [t for t in st.session_state.plan_by_week.get(chosen_wk, []) if t.get("day") == day_label]
         items = [t for t in items if t.get("status") in status_filter]
+        if not show_hidden:
+            items = [t for t in items if not t.get("hidden")]
         if show_sort:
             items = sort_tasks_for_day(items)
         return items
@@ -1062,6 +1067,18 @@ elif tab == "주간 액티브 플랜":
             for j, item in enumerate(day_items):
                 uid = task_uid(item["task"], item.get("day", ""), item.get("week", chosen_wk))
                 base_key = f"cal_{uid}_{j}"
+
+                prev_hidden = bool(item.get("hidden"))
+                hidden_now = st.checkbox(
+                    "숨김",
+                    value=prev_hidden,
+                    key=f"{base_key}_hidden",
+                    help="숨김 처리하면 기본 보기에서 제외돼요."
+                )
+                if hidden_now != prev_hidden:
+                    item["hidden"] = hidden_now
+                    if hidden_now and not show_hidden:
+                        st.rerun()
 
                 checked_now = st.checkbox(
                     label="",

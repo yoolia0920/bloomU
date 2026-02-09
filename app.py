@@ -841,6 +841,14 @@ if tab == "채팅":
     user = st.chat_input("지금 어떤 ‘처음’을 시작하려고 해? (목표/기한/현재수준/제약을 같이 적어줘)")
     if not user and st.session_state.last_ai_answer:
         render_recent_answer()
+if tab == "채팅":
+    st.subheader("💬 상담/코칭 챗")
+
+    for m in st.session_state.messages:
+        with st.chat_message(m["role"]):
+            st.markdown(m["content"])
+
+    user = st.chat_input("지금 어떤 ‘처음’을 시작하려고 해? (목표/기한/현재수준/제약을 같이 적어줘)")
     if user:
         wk = week_key()
         update_streak_and_badges()

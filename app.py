@@ -335,6 +335,12 @@ def ensure_state():
         st.session_state.badges_unlocked = set()
     if "usage" not in st.session_state:
         st.session_state.usage = {"last_active": None, "streak": 0}
+    if "last_ai_answer" not in st.session_state:
+        st.session_state.last_ai_answer = ""
+    if "last_evidence_mode" not in st.session_state:
+        st.session_state.last_evidence_mode = False
+    if "last_sources_pool" not in st.session_state:
+        st.session_state.last_sources_pool = []
     ensure_core_context()
 
     # ✅ 사용자 Notion 입력 기반 저장(1번)

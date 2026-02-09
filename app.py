@@ -335,10 +335,6 @@ def ensure_state():
         st.session_state.badges_unlocked = set()
     if "usage" not in st.session_state:
         st.session_state.usage = {"last_active": None, "streak": 0}
-    if "last_ai_answer" not in st.session_state:
-        st.session_state.last_ai_answer = None
-    if "last_evidence_mode" not in st.session_state:
-        st.session_state.last_evidence_mode = False
     ensure_core_context()
 
     # ✅ 사용자 Notion 입력 기반 저장(1번)
@@ -817,10 +813,6 @@ if tab == "채팅":
             st.markdown(m["content"])
 
     user = st.chat_input("지금 어떤 ‘처음’을 시작하려고 해? (목표/기한/현재수준/제약을 같이 적어줘)")
-    if not user and st.session_state.last_ai_answer:
-        st.markdown("#### 최근 답변")
-        render_ai_answer(st.session_state.last_ai_answer, st.session_state.last_evidence_mode)
-        st.divider()
     if user:
         wk = week_key()
         update_streak_and_badges()

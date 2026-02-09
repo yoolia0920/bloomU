@@ -335,12 +335,6 @@ def ensure_state():
         st.session_state.badges_unlocked = set()
     if "usage" not in st.session_state:
         st.session_state.usage = {"last_active": None, "streak": 0}
-    if "last_ai_answer" not in st.session_state:
-        st.session_state.last_ai_answer = None
-    if "last_evidence_mode" not in st.session_state:
-        st.session_state.last_evidence_mode = False
-    if "last_sources_pool" not in st.session_state:
-        st.session_state.last_sources_pool = []
     ensure_core_context()
 
     # ✅ 사용자 Notion 입력 기반 저장(1번)
@@ -814,38 +808,11 @@ st.caption(ONE_LINER)
 if tab == "채팅":
     st.subheader("💬 상담/코칭 챗")
 
-    def render_recent_links(sources: Optional[List[Dict[str, str]]] = None):
-        sources = sources or st.session_state.last_sources_pool or []
-        if not sources:
-            return
-        st.markdown("#### 추천 링크")
-        for s in sources[:5]:
-            title = s.get("title") or s.get("url")
-            url = s.get("url")
-            if url:
-                st.markdown(f"- [{title}]({url})")
-        st.divider()
-
-    def render_recent_answer():
-        if not st.session_state.last_ai_answer:
-            return
-        with st.chat_message("assistant"):
-            render_ai_answer(st.session_state.last_ai_answer, st.session_state.last_evidence_mode)
-            render_recent_links()
-
-    rendered_rich_answer = False
     for m in st.session_state.messages:
         with st.chat_message(m["role"]):
-            if m.get("role") == "assistant" and m.get("answer"):
-                render_ai_answer(m.get("answer"), m.get("evidence_mode", False))
-                render_recent_links(m.get("sources", []))
-                rendered_rich_answer = True
-            else:
-                st.markdown(m["content"])
+            st.markdown(m["content"])
 
     user = st.chat_input("지금 어떤 ‘처음’을 시작하려고 해? (목표/기한/현재수준/제약을 같이 적어줘)")
-    if not user and st.session_state.last_ai_answer and not rendered_rich_answer:
-        render_recent_answer()
     if user:
         wk = week_key()
         update_streak_and_badges()
@@ -947,13 +914,7 @@ if tab == "채팅":
                 f"**전략**\n" + "\n".join([f"- {s}" for s in ans.get("strategies", [])]) + "\n\n"
                 f"**불확실성 태그**: {ans.get('uncertainty_tag','')}\n"
             )
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": summary_md,
-                "answer": ans,
-                "evidence_mode": evidence_mode,
-                "sources": sources_pool,
-            })
+            st.session_state.messages.append({"role": "assistant", "content": summary_md})
 
         unlock_badges()
 

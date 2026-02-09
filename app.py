@@ -198,6 +198,94 @@ def update_streak_and_badges():
     if st.session_state.usage.get("streak", 0) >= 3:
         st.session_state.badges_unlocked.add("streak_3")
 
+def ensure_core_context():
+    if "core_context" not in st.session_state:
+        st.session_state.core_context = {
+            "profile": {},
+            "weeks": {},
+        }
+
+def _parse_labeled_value(text: str, label: str) -> str:
+    for line in (text or "").splitlines():
+        if label not in line:
+            continue
+        parts = line.split(":", 1)
+        if len(parts) == 2:
+            val = parts[1].strip()
+            if val:
+                return val
+    return ""
+
+def extract_core_signals(text: str) -> Dict[str, str]:
+    if not text:
+        return {"goal": "", "current_status": "", "constraints": ""}
+    goal = _parse_labeled_value(text, "목표") or _parse_labeled_value(text, "주간 목표")
+    current_status = _parse_labeled_value(text, "현재") or _parse_labeled_value(text, "현재 상태")
+    constraints = _parse_labeled_value(text, "제약") or _parse_labeled_value(text, "제한")
+    return {
+        "goal": goal,
+        "current_status": current_status,
+        "constraints": constraints,
+    }
+
+def get_week_core_context(wk: str) -> Dict[str, Any]:
+    ensure_core_context()
+    weeks = st.session_state.core_context.setdefault("weeks", {})
+    if wk not in weeks:
+        weeks[wk] = {
+            "week": wk,
+            "goal": "",
+            "current_status": "",
+            "constraints": "",
+            "last_user_message": "",
+            "survey": {},
+            "ab_metrics": {},
+            "plan": {"tasks": 0, "done": 0, "completion": None},
+            "updated_at": dt.datetime.now().isoformat(),
+        }
+    return weeks[wk]
+
+def update_core_context_from_settings():
+    ensure_core_context()
+    st.session_state.core_context["profile"] = {
+        "tone": st.session_state.settings.get("tone"),
+        "level": st.session_state.settings.get("level"),
+        "domain": st.session_state.settings.get("domain"),
+        "nickname": st.session_state.settings.get("nickname"),
+        "evidence_mode": st.session_state.settings.get("evidence_mode"),
+    }
+
+def update_core_context_from_chat(user_text: str, wk: str):
+    core = get_week_core_context(wk)
+    signals = extract_core_signals(user_text)
+    if signals.get("goal"):
+        core["goal"] = signals["goal"]
+    if signals.get("current_status"):
+        core["current_status"] = signals["current_status"]
+    if signals.get("constraints"):
+        core["constraints"] = signals["constraints"]
+    core["last_user_message"] = user_text
+    core["updated_at"] = dt.datetime.now().isoformat()
+
+def update_core_context_from_plan(wk: str, tasks: Optional[List[Dict[str, Any]]] = None):
+    core = get_week_core_context(wk)
+    tasks = tasks if tasks is not None else (st.session_state.plan_by_week.get(wk, []) or [])
+    done = sum(1 for t in tasks if t.get("status") == "체크")
+    total = len(tasks)
+    completion = round(100 * done / total, 1) if total else None
+    core["plan"] = {"tasks": total, "done": done, "completion": completion}
+    core["updated_at"] = dt.datetime.now().isoformat()
+
+def update_core_context_from_survey(wk: str, survey: Dict[str, Any]):
+    core = get_week_core_context(wk)
+    core["survey"] = dict(survey or {})
+    core["updated_at"] = dt.datetime.now().isoformat()
+
+def update_core_context_from_ab_metrics(wk: str, metrics: Dict[str, Any]):
+    core = get_week_core_context(wk)
+    core["ab_metrics"] = dict(metrics or {})
+    core["updated_at"] = dt.datetime.now().isoformat()
+
 def unlock_badges():
     if any(m["role"] == "user" for m in st.session_state.messages):
         st.session_state.badges_unlocked.add("first_chat")
@@ -208,6 +296,7 @@ def unlock_badges():
 
     wk = st.session_state.active_plan.get("week", week_key())
     tasks = st.session_state.plan_by_week.get(wk, []) or []
+    update_core_context_from_plan(wk, tasks)
     done = sum(1 for t in tasks if t.get("status") == "체크")
     if done >= 3:
         st.session_state.badges_unlocked.add("plan_3_done")
@@ -246,6 +335,13 @@ def ensure_state():
         st.session_state.badges_unlocked = set()
     if "usage" not in st.session_state:
         st.session_state.usage = {"last_active": None, "streak": 0}
+    if "last_ai_answer" not in st.session_state:
+        st.session_state.last_ai_answer = None
+    if "last_evidence_mode" not in st.session_state:
+        st.session_state.last_evidence_mode = False
+    if "last_sources_pool" not in st.session_state:
+        st.session_state.last_sources_pool = []
+    ensure_core_context()
 
     # ✅ 사용자 Notion 입력 기반 저장(1번)
     if "notion" not in st.session_state:
@@ -661,6 +757,7 @@ st.session_state.settings.update({
     "anonymous_mode": anonymous_mode,
     "nickname": nickname,
 })
+update_core_context_from_settings()
 
 tab = st.sidebar.radio(
     "탭",
@@ -717,14 +814,43 @@ st.caption(ONE_LINER)
 if tab == "채팅":
     st.subheader("💬 상담/코칭 챗")
 
+    def render_recent_links(sources: Optional[List[Dict[str, str]]] = None):
+        sources = sources or st.session_state.last_sources_pool or []
+        if not sources:
+            return
+        st.markdown("#### 추천 링크")
+        for s in sources[:5]:
+            title = s.get("title") or s.get("url")
+            url = s.get("url")
+            if url:
+                st.markdown(f"- [{title}]({url})")
+        st.divider()
+
+    def render_recent_answer():
+        if not st.session_state.last_ai_answer:
+            return
+        with st.chat_message("assistant"):
+            render_ai_answer(st.session_state.last_ai_answer, st.session_state.last_evidence_mode)
+            render_recent_links()
+
+    rendered_rich_answer = False
     for m in st.session_state.messages:
         with st.chat_message(m["role"]):
-            st.markdown(m["content"])
+            if m.get("role") == "assistant" and m.get("answer"):
+                render_ai_answer(m.get("answer"), m.get("evidence_mode", False))
+                render_recent_links(m.get("sources", []))
+                rendered_rich_answer = True
+            else:
+                st.markdown(m["content"])
 
     user = st.chat_input("지금 어떤 ‘처음’을 시작하려고 해? (목표/기한/현재수준/제약을 같이 적어줘)")
+    if not user and st.session_state.last_ai_answer and not rendered_rich_answer:
+        render_recent_answer()
     if user:
+        wk = week_key()
         update_streak_and_badges()
         st.session_state.messages.append({"role": "user", "content": user})
+        update_core_context_from_chat(user, wk)
         with st.chat_message("user"):
             st.markdown(user)
 
@@ -754,23 +880,31 @@ if tab == "채팅":
                 [f"- {s['title']} | {s['url']}" for s in sources_pool[:5]]
             )
 
-        wk = week_key()
         survey = st.session_state.survey.get(wk)
         metrics = st.session_state.ab_metrics.get(wk)
+        core = get_week_core_context(wk)
 
         personal_context = []
-        if survey:
+        if survey or core.get("survey"):
+            survey = survey or core.get("survey")
             personal_context.append(
                 f"[이번 주 자가설문] 자신감={survey.get('confidence')}/10, 불안={survey.get('anxiety')}/10, "
                 f"에너지={survey.get('energy')}/10, 메모={survey.get('notes','')}"
             )
-        if metrics:
+        if metrics or core.get("ab_metrics"):
+            metrics = metrics or core.get("ab_metrics")
             a = metrics.get("A", {})
             b = metrics.get("B", {})
             personal_context.append(
                 f"[전략 A/B 측정] A(불안={a.get('anxiety')}, 실천={a.get('execution')}%, 성과={a.get('outcome','')}); "
                 f"B(불안={b.get('anxiety')}, 실천={b.get('execution')}%, 성과={b.get('outcome','')})"
             )
+        if core.get("goal"):
+            personal_context.append(f"[핵심 목표] {core.get('goal')}")
+        if core.get("current_status"):
+            personal_context.append(f"[현재 상태] {core.get('current_status')}")
+        if core.get("constraints"):
+            personal_context.append(f"[제약/조건] {core.get('constraints')}")
 
         user_prompt = (
             f"{sources_block}\n\n"
@@ -790,6 +924,10 @@ if tab == "채팅":
                 st.error(f"AI 응답 처리 실패(형식 오류/네트워크): {e}")
                 st.stop()
 
+            st.session_state.last_ai_answer = ans
+            st.session_state.last_evidence_mode = evidence_mode
+            st.session_state.last_sources_pool = sources_pool
+
             # save plan
             st.session_state.active_plan["week"] = wk
             st.session_state.active_plan["planA"] = (ans.get("ab_plans", {}).get("A", {}) or {}).get("steps", []) or []
@@ -799,6 +937,7 @@ if tab == "채팅":
             existing_tasks = st.session_state.plan_by_week.get(wk, []) or []
             new_tasks = [ensure_task_shape(t, wk) for t in ans.get("weekly_active_plan", [])]
             st.session_state.plan_by_week[wk] = merge_weekly_plan(existing_tasks, new_tasks, wk)
+            update_core_context_from_plan(wk, st.session_state.plan_by_week[wk])
 
             render_ai_answer(ans, evidence_mode)
 
@@ -808,7 +947,13 @@ if tab == "채팅":
                 f"**전략**\n" + "\n".join([f"- {s}" for s in ans.get("strategies", [])]) + "\n\n"
                 f"**불확실성 태그**: {ans.get('uncertainty_tag','')}\n"
             )
-            st.session_state.messages.append({"role": "assistant", "content": summary_md})
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": summary_md,
+                "answer": ans,
+                "evidence_mode": evidence_mode,
+                "sources": sources_pool,
+            })
 
         unlock_badges()
 
@@ -1063,6 +1208,7 @@ elif tab == "전략 A/B 측정":
             "outcome": st.session_state.get(f"ab_out_{wk}_B", ""),
             "notes": st.session_state.get(f"ab_note_{wk}_B", ""),
         }
+        update_core_context_from_ab_metrics(wk, st.session_state.ab_metrics[wk])
         st.success("저장됨! 다음에 ‘채팅’에서는 답변을 더 개인맞춤형으로 해드릴게요.")
 
 
@@ -1108,6 +1254,7 @@ elif tab == "주간 자가설문":
             "notes": notes.strip(),
             "saved_at": dt.datetime.now().isoformat(),
         }
+        update_core_context_from_survey(wk, st.session_state.survey[wk])
         unlock_badges()
         st.success("저장 완료! 주간 리포트/대시보드에 반영돼요.")
 
@@ -1125,13 +1272,15 @@ elif tab == "주간 리포트/성장 대시보드":
 
     rows = []
     for wk in weeks:
-        s = st.session_state.survey.get(wk, {})
-        m = st.session_state.ab_metrics.get(wk, {})
+        core = get_week_core_context(wk)
+        s = st.session_state.survey.get(wk, {}) or core.get("survey", {})
+        m = st.session_state.ab_metrics.get(wk, {}) or core.get("ab_metrics", {})
         tasks = st.session_state.plan_by_week.get(wk, []) or []
 
         completion = None
         if tasks:
             completion = round(100 * sum(1 for t in tasks if t.get("status") == "체크") / len(tasks), 1)
+        update_core_context_from_plan(wk, tasks)
 
         rows.append({
             "week": wk,

@@ -891,6 +891,9 @@ if tab == "채팅":
                 st.error(f"AI 응답 처리 실패(형식 오류/네트워크): {e}")
                 st.stop()
 
+            st.session_state.last_ai_answer = ans
+            st.session_state.last_evidence_mode = evidence_mode
+
             # save plan
             st.session_state.active_plan["week"] = wk
             st.session_state.active_plan["planA"] = (ans.get("ab_plans", {}).get("A", {}) or {}).get("steps", []) or []

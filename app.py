@@ -8,177 +8,39 @@ import streamlit as st
 from openai import OpenAI
 
 
-# =========================
-# App Identity
-# =========================
-APP_NAME = "Bloom U"
-SLOGAN = '“Where You Begin to Bloom” – 20대의 모든 ‘처음’을 함께 합니다.'
-ONE_LINER = "내 상황 · 수준 · 성향에 맞춰 함께 성장해주는 개인 트레이너형 AI"
-TARGET = "20대 대학생"
+from bloomu.constants import (
+    APP_NAME,
+    BADGES,
+    DAYS,
+    DOMAIN_OPTIONS,
+    IDX_TO_DAY,
+    LEVEL_OPTIONS,
+    MODEL,
+    ONE_LINER,
+    PLAN_STATUS_OPTIONS,
+    SLOGAN,
+    TARGET,
+    TONE_GUIDE,
+    TONE_OPTIONS,
+    UNCERTAINTY_OPTIONS,
+)
+from bloomu.evidence import curated_sources, serper_search
+from bloomu.helpers import (
+    detect_high_risk,
+    ensure_task_shape,
+    extract_core_signals,
+    is_allowed_url,
+    merge_weekly_plan,
+    move_task_to_next_slot,
+    normalize_day_label,
+    sort_tasks_for_day,
+    task_uid,
+    today,
+    week_key,
+    week_label_yy_mm_ww_from_week_start,
+    week_start_from_key,
+)
 
-MODEL = "gpt-5-mini"
-
-TONE_OPTIONS = ["따뜻한 친구형", "현실직언형", "선배멘토형", "코치·트레이너형", "부모님형"]
-LEVEL_OPTIONS = ["완전 입문", "진행 중", "고급자"]
-DOMAIN_OPTIONS = ["진로", "연애", "전공공부", "일상 멘탈관리", "개인사정(가족/경제/관계)", "기타"]
-
-UNCERTAINTY_OPTIONS = ["확실(규정/공식)", "보통(평균 통계/경험치)", "추정(개인화 필요)"]
-
-BADGES = [
-    ("first_chat", "첫 대화 🌱", "Bloom U와 첫 대화를 시작했어요."),
-    ("first_plan", "첫 플랜 🗓️", "주간 액티브 플랜을 만들었어요."),
-    ("plan_3_done", "실천가 💪", "플랜에서 3개 이상의 액션을 완료했어요."),
-    ("plan_7_done", "최고의 실천가🔥💪", "플랜을 모두 완료했어요!"),
-    ("weekly_checkin", "체크인 📈", "주간 자신감 설문을 완료했어요."),
-    ("streak_3", "3일 연속 🔥", "3일 연속으로 Bloom U를 사용했어요."),
-    ("streak_7", "7일 연속 🔥🔥", "일주일 동안 Bloom U를 사용했어요."),
-    ("streak_31", "한 달 연속 성실함🔥🔥🔥", "한 달 동안 Bloom U를 사용했어요!"),
-]
-
-ALLOWED_SOURCE_DOMAINS = [
-    ".gov", ".edu", "who.int", "oecd.org", "nih.gov", "cdc.gov", "apa.org",
-    "indeed.com", "glassdoor.com", "ncs.gov", "moel.go.kr", "korea.kr"
-]
-
-PLAN_STATUS_OPTIONS = ["체크", "진행중", "미루기"]
-STATUS_SORT_PRIORITY = {"진행중": 0, "미루기": 1, "체크": 2}
-DAYS = ["월", "화", "수", "목", "금", "토", "일"]
-DAY_TO_IDX = {d: i for i, d in enumerate(DAYS)}
-IDX_TO_DAY = {i: d for d, i in DAY_TO_IDX.items()}
-
-# ✅ 톤 옵션별 “말투 규칙” (프롬프트에 강제 주입)
-TONE_GUIDE = {
-    "따뜻한 친구형": [
-        "부드럽고 다정한 말투. 시작은 공감 1~2문장.",
-        "제안형 표현(‘~해볼래?’, ‘괜찮다면…’)을 사용.",
-        "단정/비난 금지. 대안은 2~3개로 간단히."
-    ],
-    "현실직언형": [
-        "간결·직설. 핵심부터 말하고 다음 행동을 명확히.",
-        "핑계는 부드럽게 끊고 ‘지금 할 것’ 1~3개 제시.",
-        "과장된 위로는 하지 말고 실행에 집중."
-    ],
-    "선배멘토형": [
-        "선배처럼 공감 + 경험/일반론 기반 조언.",
-        "장기/단기 로드맵과 우선순위를 잡아준다.",
-        "마지막에 질문 1개만 던져 선택을 돕는다."
-    ],
-    "코치·트레이너형": [
-        "목표지향, 측정 가능한 행동 중심.",
-        "시간 박스(예: 15분) + 체크리스트 + 피드백 루프 포함.",
-        "불필요한 감정 과잉 없이 ‘실행/측정’ 중심."
-    ],
-    "부모님형": [
-        "따뜻하지만 단호. 안전/건강/기본 루틴을 먼저 챙김.",
-        "수면/식사/무리 금지 같은 기본 루틴 1회 언급.",
-        "비난은 금지, 보호적 뉘앙스로 조언."
-    ],
-}
-
-
-# =========================
-# Utilities
-# =========================
-def today() -> dt.date:
-    return dt.date.today()
-
-def week_key(d: Optional[dt.date] = None) -> str:
-    d = d or today()
-    y, w, _ = d.isocalendar()
-    return f"{y}-W{w:02d}"
-
-def week_start_from_key(wk: str) -> dt.date:
-    try:
-        y_str, w_str = wk.split("-W")
-        y = int(y_str)
-        w = int(w_str)
-        return dt.date.fromisocalendar(y, w, 1)  # Monday
-    except Exception:
-        y, w, _ = today().isocalendar()
-        return dt.date.fromisocalendar(y, w, 1)
-
-def week_of_month(d: dt.date) -> int:
-    first = d.replace(day=1)
-    first_monday = first - dt.timedelta(days=first.weekday())
-    this_monday = d - dt.timedelta(days=d.weekday())
-    return (this_monday - first_monday).days // 7 + 1
-
-def week_label_yy_mm_ww_from_week_start(week_start: dt.date) -> str:
-    yy = week_start.year % 100
-    mm = week_start.month
-    ww = week_of_month(week_start)
-    return f"{yy:02d}년 {mm:02d}월 {ww:02d}주"
-
-def is_allowed_url(url: str) -> bool:
-    u = (url or "").lower()
-    return u.startswith("http") and any(dom in u for dom in ALLOWED_SOURCE_DOMAINS)
-
-def detect_high_risk(text: str) -> bool:
-    k = [
-        "자해", "죽고", "극단", "우울", "공황", "자살", "리스트컷",
-        "진단", "치료", "처방", "약", "병원",
-        "대출", "빚", "투자", "코인", "주식", "세금",
-        "고소", "합의", "소송", "불법", "사기", "폭력"
-    ]
-    t = (text or "").lower()
-    return any(x in t for x in k)
-
-def normalize_day_label(day: str) -> str:
-    d = (day or "").strip()
-    return d if d in DAYS else ""
-
-def task_uid(task: str, day: str, wk: str) -> str:
-    h = abs(hash((task or "").strip())) % 1_000_000
-    return f"{wk}_{day}_{h}"
-
-def ensure_task_shape(t: Dict[str, Any], wk: str) -> Dict[str, Any]:
-    out = {
-        "week": t.get("week") or wk,
-        "day": normalize_day_label(t.get("day") or ""),
-        "task": (t.get("task") or "").strip(),
-        "status": (t.get("status") or "").strip(),
-        "hidden": bool(t.get("hidden", False)),
-        "created_at": t.get("created_at") or dt.datetime.now().isoformat(),
-    }
-    if not out["status"]:
-        if "done" in t:
-            out["status"] = "체크" if bool(t.get("done")) else "진행중"
-        else:
-            out["status"] = "진행중"
-    if out["status"] not in PLAN_STATUS_OPTIONS:
-        out["status"] = "진행중"
-    return out
-
-def move_task_to_next_slot(t: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    '미루기' 선택 시:
-    - day가 월~토: 다음 요일로 이동 (week 유지)
-    - day가 일: 다음 주 월로 이동 (week +1)
-    - day가 비어있으면: 이번 주 '월'로 배치 (week 유지)
-    """
-    wk = t.get("week") or week_key()
-    day = normalize_day_label(t.get("day") or "")
-    if not day:
-        t["day"] = "월"
-        t["week"] = wk
-        return t
-
-    if day != "일":
-        t["day"] = IDX_TO_DAY[DAY_TO_IDX[day] + 1]
-        t["week"] = wk
-        return t
-
-    start = week_start_from_key(wk)
-    next_start = start + dt.timedelta(days=7)
-    t["week"] = week_key(next_start)
-    t["day"] = "월"
-    return t
-
-def sort_tasks_for_day(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    return sorted(
-        items,
-        key=lambda x: (STATUS_SORT_PRIORITY.get(x.get("status"), 9), (x.get("created_at") or ""))
-    )
 
 def update_streak_and_badges():
     last = st.session_state.usage.get("last_active")
@@ -205,29 +67,6 @@ def ensure_core_context():
             "profile": {},
             "weeks": {},
         }
-
-def _parse_labeled_value(text: str, label: str) -> str:
-    for line in (text or "").splitlines():
-        if label not in line:
-            continue
-        parts = line.split(":", 1)
-        if len(parts) == 2:
-            val = parts[1].strip()
-            if val:
-                return val
-    return ""
-
-def extract_core_signals(text: str) -> Dict[str, str]:
-    if not text:
-        return {"goal": "", "current_status": "", "constraints": ""}
-    goal = _parse_labeled_value(text, "목표") or _parse_labeled_value(text, "주간 목표")
-    current_status = _parse_labeled_value(text, "현재") or _parse_labeled_value(text, "현재 상태")
-    constraints = _parse_labeled_value(text, "제약") or _parse_labeled_value(text, "제한")
-    return {
-        "goal": goal,
-        "current_status": current_status,
-        "constraints": constraints,
-    }
 
 def get_week_core_context(wk: str) -> Dict[str, Any]:
     ensure_core_context()
@@ -361,99 +200,6 @@ def ensure_state():
         st.session_state.daily_patterns = st.session_state.daily_pattern
     else:
         st.session_state.daily_pattern = st.session_state.daily_patterns
-
-# =========================
-# ✅ NEW: Weekly Plan Merge (누적 저장 + 중복 방지)
-# =========================
-def merge_weekly_plan(existing: List[Dict[str, Any]], incoming: List[Dict[str, Any]], wk: str) -> List[Dict[str, Any]]:
-    """
-    기존 주간 플랜(existing)에 새로 생성된 플랜(incoming)을 '누적'합니다.
-    - 중복 기준: (week, day, task) 동일하면 기존 것을 유지 (status/created_at 유지)
-    - task 공백은 제외
-    - day가 비어있는 건 누적에서 제외(원하면 아래 조건을 바꿀 수 있어요)
-    """
-    existing = [ensure_task_shape(t, wk) for t in (existing or []) if (t.get("task") or "").strip()]
-    incoming = [ensure_task_shape(t, wk) for t in (incoming or []) if (t.get("task") or "").strip()]
-
-    merged: List[Dict[str, Any]] = []
-    seen = set()
-
-    # 1) 기존 먼저 넣기 (기존 유지)
-    for t in existing:
-        if not (t.get("day") or ""):
-            continue
-        key = (t.get("week", wk), t.get("day", ""), (t.get("task") or "").strip().lower())
-        seen.add(key)
-        merged.append(t)
-
-    # 2) 새 플랜 추가 (중복 제외)
-    for t in incoming:
-        if not (t.get("day") or ""):
-            continue
-        key = (t.get("week", wk), t.get("day", ""), (t.get("task") or "").strip().lower())
-        if key in seen:
-            continue
-        seen.add(key)
-        merged.append(t)
-
-    return merged
-
-
-# =========================
-# Evidence Search
-# =========================
-def serper_search(query: str, api_key: str, k: int = 5) -> List[Dict[str, str]]:
-    url = "https://google.serper.dev/search"
-    headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
-    payload = {"q": query, "num": k}
-    r = requests.post(url, headers=headers, json=payload, timeout=12)
-    r.raise_for_status()
-    data = r.json()
-    out = []
-    for item in (data.get("organic") or [])[:k]:
-        link = item.get("link", "")
-        title = item.get("title", "")
-        if is_allowed_url(link):
-            out.append({"title": title, "url": link})
-    return out
-
-def curated_sources(domain: str) -> List[Dict[str, str]]:
-    if domain == "진로":
-        return [
-            {"title": "고용노동부(MOEL) - 청년/취업 지원", "url": "https://www.moel.go.kr/"},
-            {"title": "OECD - Education & Skills", "url": "https://www.oecd.org/education/"},
-            {"title": "Indeed Career Guide", "url": "https://www.indeed.com/career-advice"},
-        ]
-    if domain == "전공공부":
-        return [
-            {"title": "MIT OpenCourseWare", "url": "https://ocw.mit.edu/"},
-            {"title": "Khan Academy", "url": "https://www.khanacademy.org/"},
-            {"title": "Google Scholar", "url": "https://scholar.google.com/"},
-        ]
-    if domain == "일상 멘탈관리":
-        return [
-            {"title": "WHO - Mental health", "url": "https://www.who.int/health-topics/mental-health"},
-            {"title": "CDC - Mental Health", "url": "https://www.cdc.gov/mentalhealth/"},
-            {"title": "APA - Psychology Topics", "url": "https://www.apa.org/topics"},
-        ]
-    if domain == "연애":
-        return [
-            {"title": "APA - Relationships", "url": "https://www.apa.org/topics/relationships"},
-            {"title": "CDC - Healthy Relationships", "url": "https://www.cdc.gov/"},
-            {"title": "University Counseling Center resources (예: .edu)", "url": "https://www.google.com/search?q=site%3Aedu+healthy+relationships"},
-        ]
-    if domain == "개인사정(가족/경제/관계)":
-        return [
-            {"title": "korea.kr (정부 정책/지원)", "url": "https://www.korea.kr/"},
-            {"title": "NIH - Stress & Coping", "url": "https://www.nih.gov/"},
-            {"title": "WHO - Social determinants", "url": "https://www.who.int/"},
-        ]
-    return [
-        {"title": "korea.kr", "url": "https://www.korea.kr/"},
-        {"title": "WHO", "url": "https://www.who.int/"},
-        {"title": "OECD", "url": "https://www.oecd.org/"},
-    ]
-
 
 # =========================
 # Prompting & Parsing

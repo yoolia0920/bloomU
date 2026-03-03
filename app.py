@@ -181,6 +181,8 @@ def ensure_state():
         st.session_state.last_evidence_mode = False
     if "last_sources_pool" not in st.session_state:
         st.session_state.last_sources_pool = []
+    if "welcome_signature" not in st.session_state:
+        st.session_state.welcome_signature = ""
     ensure_core_context()
 
     # ✅ 사용자 Notion 입력 기반 저장(1번)
@@ -262,6 +264,60 @@ JSON 스키마:
   }}
 }}
 """.strip()
+
+
+def build_welcome_message(settings: Dict[str, Any]) -> str:
+    nickname = settings.get("nickname", "익명")
+    tone = settings.get("tone", TONE_OPTIONS[0])
+    domain = settings.get("domain", DOMAIN_OPTIONS[0])
+
+    intro_by_tone = {
+        "따뜻한 친구형": f"안녕 {nickname}! 천천히 이야기해도 괜찮아. 너의 속도에 맞춰 같이 정리해보자.",
+        "현실직언형": f"{nickname}, 반가워. 바로 핵심부터 잡자.",
+        "선배멘토형": f"{nickname}, 잘 왔어. 선배처럼 차근차근 방향부터 잡아볼게.",
+        "코치·트레이너형": f"{nickname}, 시작하자. 지금 상태를 빠르게 점검하고 실행 계획까지 만들자.",
+        "부모님형": f"{nickname}아, 와줘서 고마워. 무리하지 않게 기본부터 챙기면서 같이 풀어가자.",
+    }
+
+    focus_by_domain = {
+        "진로": "오늘은 진로 선택과 준비를 현실적으로 나눠보자.",
+        "연애": "오늘은 연애 고민에서 감정과 행동 포인트를 함께 정리해보자.",
+        "전공공부": "오늘은 전공공부 우선순위와 학습 루틴을 분명하게 세워보자.",
+        "일상 멘탈관리": "오늘은 멘탈 관리 루틴을 가볍고 꾸준하게 실천할 수 있게 맞춰보자.",
+        "개인사정(가족/경제/관계)": "오늘은 개인사정을 고려해서 당장 가능한 선택지부터 같이 찾자.",
+        "기타": "오늘은 네 상황에 맞게 가장 중요한 문제부터 같이 정리해보자.",
+    }
+
+    intro = intro_by_tone.get(tone, intro_by_tone[TONE_OPTIONS[0]])
+    focus = focus_by_domain.get(domain, focus_by_domain["기타"])
+
+    return (
+        f"{intro}\n"
+        f"현재 상담 분야는 **{domain}**로 설정되어 있어. {focus}\n\n"
+        "시작하기 전에 목표/기한/현재 상태/제약을 짧게 알려주면, 바로 맞춤 플랜으로 도와줄게."
+    )
+
+
+def ensure_welcome_message():
+    settings = st.session_state.settings
+    signature = f"{settings.get('tone')}|{settings.get('domain')}|{settings.get('nickname')}"
+    has_user_message = any(m.get("role") == "user" for m in st.session_state.messages)
+
+    if has_user_message:
+        return
+
+    if not st.session_state.messages:
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": build_welcome_message(settings),
+        })
+        st.session_state.welcome_signature = signature
+        return
+
+    first = st.session_state.messages[0]
+    if first.get("role") == "assistant" and st.session_state.welcome_signature != signature:
+        first["content"] = build_welcome_message(settings)
+        st.session_state.welcome_signature = signature
 
 def call_openai_json(api_key: str, sys_prompt: str, user_prompt: str, chat: List[Dict[str, str]]) -> Dict[str, Any]:
     client = OpenAI(api_key=api_key)
@@ -504,6 +560,7 @@ st.session_state.settings.update({
     "anonymous_mode": anonymous_mode,
     "nickname": nickname,
 })
+ensure_welcome_message()
 update_core_context_from_settings()
 
 tab = st.sidebar.radio(

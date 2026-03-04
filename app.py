@@ -830,7 +830,7 @@ elif tab == "주간 액티브 플랜":
     st.session_state.plan_by_week[chosen_wk] = tasks
 
     st.markdown("### 달력 보기 (요일별)")
-    st.caption("체크박스 = ‘체크’ 토글 / 상태 선택 = 체크·진행중·미루기 / ‘미루기’ 선택 시 자동으로 다음 요일(또는 다음 주)로 이동")
+    st.caption("체크박스와 상태 선택은 서로 연동됩니다. / 상태 선택 = 체크·진행중·미루기 / ‘미루기’ 선택 시 자동으로 다음 요일(또는 다음 주)로 이동")
 
     cols = st.columns(7)
 
@@ -900,13 +900,18 @@ elif tab == "주간 액티브 플랜":
                 )
 
                 prev_status = item["status"]
-                if checked_now:
-                    item["status"] = "체크"
-                else:
-                    if selected_status == "체크":
+                checkbox_was_checked = (prev_status == "체크")
+
+                # 상태 선택값이 바뀌면 체크박스도 자동 반영
+                if selected_status != prev_status:
+                    item["status"] = selected_status
+
+                # 체크박스 토글이 바뀌면 상태도 자동 반영
+                if checked_now != checkbox_was_checked:
+                    if checked_now:
+                        item["status"] = "체크"
+                    elif item["status"] == "체크":
                         item["status"] = "진행중"
-                    else:
-                        item["status"] = selected_status
 
                 # Auto-reschedule when switched to '미루기'
                 if item["status"] == "미루기" and prev_status != "미루기":

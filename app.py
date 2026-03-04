@@ -5,7 +5,7 @@ from typing import Dict, Any, List, Optional
 import pandas as pd
 import requests
 import streamlit as st
-from openai import OpenAI
+from openai import APIConnectionError, OpenAI, RateLimitError
 
 
 from bloomu.constants import (
@@ -338,6 +338,20 @@ def call_openai_json(api_key: str, sys_prompt: str, user_prompt: str, chat: List
         txt = txt[start:end + 1] if start != -1 and end != -1 else txt
 
     return json.loads(txt)
+
+
+def format_ai_error(err: Exception) -> str:
+    if isinstance(err, RateLimitError) or getattr(err, "status_code", None) == 429:
+        return (
+            "AI 호출 한도를 초과했어요(429).\n"
+            "- OpenAI 결제/요금제/사용량 한도를 확인해 주세요.\n"
+            "- 잠시 후 다시 시도하거나, 다른 API Key를 사용해 주세요."
+        )
+
+    if isinstance(err, APIConnectionError):
+        return "OpenAI 서버 연결에 실패했어요. 네트워크 상태를 확인한 뒤 다시 시도해 주세요."
+
+    return f"AI 응답 처리 실패(형식 오류/네트워크): {err}"
 
 def normalize_and_validate(ai: Dict[str, Any], sources_pool: List[Dict[str, str]], wk: str) -> Dict[str, Any]:
     out = {
@@ -725,7 +739,7 @@ if tab == "채팅":
                     ai_json = call_openai_json(api_key, sys_prompt, user_prompt, st.session_state.messages)
                     ans = normalize_and_validate(ai_json, sources_pool, wk=wk)
             except Exception as e:
-                st.error(f"AI 응답 처리 실패(형식 오류/네트워크): {e}")
+                st.error(format_ai_error(e))
                 st.stop()
 
             st.session_state.last_ai_answer = ans
